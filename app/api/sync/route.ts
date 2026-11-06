@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
-import { SLATE_GAME_TYPE, getSportsDataIOSlate } from "@/lib/player-data";
+import { SLATE_GAME_TYPE, getSportsDataIOSlate, withStoredDkSalaries } from "@/lib/player-data";
 
 export const maxDuration = 60;
 
@@ -28,7 +28,8 @@ async function sync(request: NextRequest) {
     return NextResponse.json({ error: "DATABASE_URL is not configured." }, { status: 500 });
   }
 
-  const live = await getSportsDataIOSlate();
+  const raw = await getSportsDataIOSlate();
+  const live = raw ? await withStoredDkSalaries(raw) : null;
   if (!live) {
     return NextResponse.json({ error: "SportsDataIO returned no projections (check SPORTS_DATA_IO_API_KEY)." }, { status: 502 });
   }

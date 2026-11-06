@@ -1,7 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ROSTER_SLOTS, assignSlots, lineupProjection, lineupSalary, lineupToCsv, optimizeLineup } from "@/lib/optimizer";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { applyDkSalariesToSlate, isInactive, parseDkSalariesCsv } from "@/lib/dk-salaries";
+import {
+  ROSTER_SLOTS,
+  assignSlots,
+  canExportForDraftKings,
+  lineupProjection,
+  lineupSalary,
+  lineupToCsv,
+  lineupToDraftKingsCsv,
+  optimizeLineup,
+} from "@/lib/optimizer";
 import type { Matchup, PoolPlayer, SlateData } from "@/lib/types";
 
 type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value";
@@ -42,7 +52,33 @@ function downloadCsv(filename: string, csv: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function Dashboard({ slate }: { slate: SlateData }) {
+type Upload = { csv: string; uploadedAt: string; fileName: string };
+
+export default function Dashboard({ slate: initialSlate }: { slate: SlateData }) {
+  const storageKey = `fieldgoal-dk-salaries-${initialSlate.season}-${initialSlate.week}`;
+  const [upload, setUpload] = useState<Upload | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  // Restore a salary file uploaded earlier this week (browser-only, so read after mount).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time hydration from localStorage
+      if (raw) setUpload(JSON.parse(raw) as Upload);
+    } catch {
+      // Storage unavailable; uploads just won't persist.
+    }
+  }, [storageKey]);
+
+  const slate = useMemo(() => {
+    if (!upload) return initialSlate;
+    try {
+      return applyDkSalariesToSlate(initialSlate, parseDkSalariesCsv(upload.csv), upload.uploadedAt);
+    } catch {
+      return initialSlate;
+    }
+  }, [initialSlate, upload]);
+
   const [position, setPosition] = useState<PositionFilter>("ALL");
   const [gameFilter, setGameFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -96,7 +132,13 @@ export default function Dashboard({ slate }: { slate: SlateData }) {
       setMessage(`No open ${player.position === "QB" || player.position === "DST" ? player.position : `${player.position}/FLEX`} slot for ${player.name}.`);
       return;
     }
-    setMessage(player.salary > remaining ? `Heads up: ${player.name} puts you over the cap.` : null);
+    setMessage(
+      isInactive(player.injury)
+        ? `Heads up: ${player.name} is listed ${player.injury}.`
+        : player.salary > remaining
+          ? `Heads up: ${player.name} puts you over the cap.`
+          : null,
+    );
     setLineupIds((ids) => [...ids, player.id]);
   }
 
@@ -127,7 +169,50 @@ export default function Dashboard({ slate }: { slate: SlateData }) {
       setMessage("Add players or run the optimizer before exporting.");
       return;
     }
-    downloadCsv(`fieldgoal-week${slate.week}-lineup.csv`, lineupToCsv(lineup));
+    if (canExportForDraftKings(lineup)) {
+      downloadCsv(`DKUpload-week${slate.week}.csv`, lineupToDraftKingsCsv(lineup));
+      setMessage("Downloaded a DraftKings upload file. On DraftKings: Lineups → Upload Lineups.");
+    } else {
+      downloadCsv(`fieldgoal-week${slate.week}-lineup.csv`, lineupToCsv(lineup));
+      setMessage(
+        lineup.length < ROSTER_SLOTS.length
+          ? "Lineup isn't full, so this is a readable CSV. Fill every slot for a DraftKings upload file."
+          : "Downloaded a readable CSV. Upload your DKSalaries.csv to get a DraftKings upload file.",
+      );
+    }
+  }
+
+  async function handleSalaryFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const csv = await file.text();
+      const rows = parseDkSalariesCsv(csv);
+      const next: Upload = { csv, uploadedAt: new Date().toISOString(), fileName: file.name };
+      setUpload(next);
+      setLineupIds([]);
+      setExcludedIds([]);
+      setMessage(`Loaded ${rows.length} DraftKings salaries from ${file.name}.`);
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        // Too large or storage blocked; still applied for this session.
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Couldn't read that file.");
+    }
+  }
+
+  function clearUpload() {
+    setUpload(null);
+    setLineupIds([]);
+    setMessage("Removed the uploaded salary file.");
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore
+    }
   }
 
   const sortHeader = (k: SortKey, label: string) => (
@@ -156,6 +241,18 @@ export default function Dashboard({ slate }: { slate: SlateData }) {
             </span>
             <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-emerald-300">{slate.source}</span>
             <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">{slate.players.length} players</span>
+            <input ref={fileInput} type="file" accept=".csv,text/csv" onChange={handleSalaryFile} className="hidden" />
+            <button
+              onClick={() => fileInput.current?.click()}
+              className="rounded-full bg-emerald-400 px-3 py-1 font-semibold text-slate-950 hover:bg-emerald-300"
+            >
+              {slate.dkSalaries ? "Replace DK salaries" : "Upload DK salaries"}
+            </button>
+            {upload && (
+              <button onClick={clearUpload} className="rounded-full border border-slate-700 px-3 py-1 text-slate-300 hover:border-rose-400">
+                Remove {upload.fileName}
+              </button>
+            )}
             {topValue && (
               <span className="rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-amber-300">
                 Top value: {topValue.name} ({topValue.value.toFixed(2)}x)
@@ -269,12 +366,21 @@ export default function Dashboard({ slate }: { slate: SlateData }) {
                           <p className="font-semibold text-white">{p.name}</p>
                           <p className="text-xs text-slate-500">
                             {p.position} · {p.team}
-                            {p.injury && <span className="ml-1 text-rose-400">{p.injury}</span>}
+                            {p.injury && (
+                              <span className={`ml-1 font-semibold ${isInactive(p.injury) ? "text-rose-400" : "text-amber-300"}`}>{p.injury}</span>
+                            )}
                           </p>
                         </td>
                         <td className="px-3 py-2 text-slate-400">{p.opponent ? `vs ${p.opponent}` : "—"}</td>
                         <td className="px-3 py-2">{money(p.salary)}</td>
-                        <td className="px-3 py-2 font-bold text-emerald-300">{p.projected.toFixed(1)}</td>
+                        <td className="px-3 py-2 font-bold text-emerald-300">
+                          {p.projected.toFixed(1)}
+                          {p.projectionFromDkAvg && (
+                            <span title="No projection available; DraftKings season average" className="ml-1 text-[10px] font-normal text-slate-500">
+                              avg
+                            </span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-slate-400">{p.floor.toFixed(1)}</td>
                         <td className="px-3 py-2 text-slate-400">{p.ceiling.toFixed(1)}</td>
                         <td className="px-3 py-2 text-amber-300">{p.value > 0 ? `${p.value.toFixed(2)}x` : "—"}</td>
@@ -350,7 +456,7 @@ export default function Dashboard({ slate }: { slate: SlateData }) {
                 {lineup.length > 0 ? "Optimize around picks" : "Optimize lineup"}
               </button>
               <button onClick={exportLineup} className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold hover:border-slate-500">
-                Export CSV
+                Export
               </button>
               <button
                 onClick={() => {

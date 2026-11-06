@@ -1,3 +1,4 @@
+import { NOTICE_NO_DST, NOTICE_TRIAL, applyDkSalariesToSlate, type DkSalaryRow } from "@/lib/dk-salaries";
 import prisma from "@/lib/prisma";
 import {
   estimateRange,
@@ -216,6 +217,7 @@ export async function getDatabaseSlate(): Promise<SlateData | null> {
         status: g.status,
       })),
       notices: [`Showing the last database sync (${slate.updatedAt.toLocaleString("en-US")}).`],
+      dkSalaries: null,
     };
   } catch (error) {
     console.error("Database slate read failed", error);
@@ -233,10 +235,10 @@ export async function getSportsDataIOSlate(): Promise<SlateData | null> {
 
   const notices: string[] = [];
   if (projections.scrambled) {
-    notices.push("SportsDataIO trial key detected: salaries, lines and some stats are scrambled sample values.");
+    notices.push(NOTICE_TRIAL);
   }
   if (!projections.players.some((p) => p.position === "DST")) {
-    notices.push("This feed has no DST projections. Pick a defense manually on DraftKings; the optimizer reserves salary for it.");
+    notices.push(NOTICE_NO_DST);
   }
   notices.push("Floor and ceiling are estimated from projection and positional volatility.");
 
@@ -248,17 +250,57 @@ export async function getSportsDataIOSlate(): Promise<SlateData | null> {
     players: projections.players,
     games,
     notices,
+    dkSalaries: null,
   };
 }
 
+/** DraftKings salary rows uploaded for a given week, newest upload only. */
+export async function getStoredDkSalaries(season: number, week: number): Promise<{ rows: DkSalaryRow[]; uploadedAt: string } | null> {
+  if (!process.env.DATABASE_URL) return null;
+  try {
+    const rows = await prisma.dkSalary.findMany({ where: { season, week } });
+    if (rows.length === 0) return null;
+    const uploadedAt = rows.reduce((max, r) => (r.uploadedAt > max ? r.uploadedAt : max), rows[0].uploadedAt);
+    return {
+      uploadedAt: uploadedAt.toISOString(),
+      rows: rows.map((r) => ({
+        dkId: r.dkId,
+        name: r.name,
+        position: toPosition(r.position) ?? "WR",
+        rosterPosition: r.rosterPosition,
+        salary: r.salary,
+        team: r.team,
+        opponent: r.opponent,
+        kickoff: r.kickoff,
+        gameInfo: r.gameInfo,
+        avgPoints: r.avgPoints,
+        status: r.status,
+      })),
+    };
+  } catch (error) {
+    console.error("DK salary read failed", error);
+    return null;
+  }
+}
+
+/** Overlays the week's uploaded DraftKings salaries, if any, onto a slate. */
+export async function withStoredDkSalaries(slate: SlateData): Promise<SlateData> {
+  const stored = await getStoredDkSalaries(slate.season, slate.week);
+  return stored ? applyDkSalariesToSlate(slate, stored.rows, stored.uploadedAt) : slate;
+}
+
 export async function getSlateData(): Promise<SlateData> {
+  return withStoredDkSalaries(await getBaseSlate());
+}
+
+async function getBaseSlate(): Promise<SlateData> {
   const live = await getSportsDataIOSlate();
   if (live) return live;
 
   const feedPlayers = await fetchFeedPlayers();
   if (feedPlayers.length > 0) {
     const { season, week } = await getSeasonWeek();
-    return { season, week, source: "DFS feed", salaryCap: DK_CLASSIC_CAP, players: feedPlayers, games: [], notices: [] };
+    return { season, week, source: "DFS feed", salaryCap: DK_CLASSIC_CAP, players: feedPlayers, games: [], notices: [], dkSalaries: null };
   }
 
   const db = await getDatabaseSlate();
@@ -273,5 +315,6 @@ export async function getSlateData(): Promise<SlateData> {
     players: samplePlayers,
     games: sampleGames,
     notices: ["No data source is configured. Showing illustrative sample players; set SPORTS_DATA_IO_API_KEY for live data."],
+    dkSalaries: null,
   };
 }

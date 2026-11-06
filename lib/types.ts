@@ -22,6 +22,10 @@ export type PoolPlayer = {
   /** Points per $1K of salary. */
   value: number;
   injury: string | null;
+  /** DraftKings player ID (from an uploaded DKSalaries.csv). */
+  dkId?: string;
+  /** True when the projection is DraftKings' season average, not a real projection. */
+  projectionFromDkAvg?: boolean;
 };
 
 export type Matchup = {
@@ -45,4 +49,6 @@ export type SlateData = {
   games: Matchup[];
   /** Human-readable notes about data quality (trial keys, missing DST, etc). */
   notices: string[];
+  /** Set when salaries come from an uploaded DraftKings CSV. */
+  dkSalaries: { uploadedAt: string; players: number } | null;
 };

@@ -1,3 +1,4 @@
+import { isInactive } from "@/lib/dk-salaries";
 import type { PoolPlayer, Position } from "@/lib/types";
 
 /** DraftKings NFL Classic roster. */
@@ -133,7 +134,7 @@ export function optimizeLineup({
 
   const lockedCount = (pos: Position) => locked.filter((p) => p.position === pos).length;
   const blocked = new Set([...lockedIds, ...excludedIds]);
-  const available = pool.filter((p) => !blocked.has(p.id) && p.salary > 0 && p.projected > 0);
+  const available = pool.filter((p) => !blocked.has(p.id) && !isInactive(p.injury) && p.salary > 0 && p.projected > 0);
 
   const positions: Position[] = hasDst ? ["QB", "RB", "WR", "TE", "DST"] : ["QB", "RB", "WR", "TE"];
   const groups = new Map<Position, GroupResult>();
@@ -182,6 +183,18 @@ export function optimizeLineup({
 
   const players = [...locked, ...bestResult.players];
   return { ok: true, players, salary: lineupSalary(players), projected: lineupProjection(players) };
+}
+
+/** True when every slot is filled with a player that has a DraftKings ID. */
+export function canExportForDraftKings(players: PoolPlayer[]) {
+  const slots = assignSlots(players);
+  return !!slots && slots.every((p) => p?.dkId);
+}
+
+/** DraftKings bulk-upload format: slot header row, then player IDs. */
+export function lineupToDraftKingsCsv(players: PoolPlayer[]): string {
+  const slots = assignSlots(players) ?? [];
+  return [ROSTER_SLOTS.join(","), slots.map((p) => p?.dkId ?? "").join(",")].join("\n");
 }
 
 /** CSV in DraftKings slot order, suitable for spreadsheets or manual entry. */

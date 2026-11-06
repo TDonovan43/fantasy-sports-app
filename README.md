@@ -7,7 +7,8 @@ A Next.js 16 dashboard for DraftKings NFL Classic contests: a filterable player 
 - **Player board**: the full weekly pool with position tabs (QB/RB/WR/TE/FLEX/DST), search, a game filter (click a matchup), sortable columns, and per-player exclude.
 - **Lineup builder**: DraftKings Classic slots (QB, 2 RB, 3 WR, TE, FLEX, DST) with a $50K cap and remaining salary per open slot.
 - **Optimizer**: finds the max-projection lineup under the cap, keeping any players you've already added. It's an exact knapsack search, not greedy. If the feed has no defenses, it holds back $3,000 for one.
-- **Export**: downloads the lineup as a CSV in slot order.
+- **Export**: once DraftKings salaries are loaded, downloads a DraftKings upload file (slot header + player IDs) for Lineups → Upload Lineups; otherwise a readable CSV.
+- **Injuries**: DraftKings status is shown on the board; the optimizer skips OUT, IR and Doubtful players.
 - **Matchups**: kickoff time, spread and total from SportsDataIO.
 
 ## Data sources
@@ -21,6 +22,19 @@ A Next.js 16 dashboard for DraftKings NFL Classic contests: a filterable player 
 
 Floor and ceiling are estimated from the projection and positional volatility unless the source supplies them.
 A SportsDataIO trial key returns scrambled salaries and lines; the dashboard shows a notice when it detects one.
+
+## DraftKings salaries
+
+SportsDataIO trial keys scramble salaries, so the real salaries come from DraftKings' own file. On DraftKings, open any **Classic** contest for the slate and choose **Export to CSV** (`DKSalaries.csv`). Then do one of the following:
+
+- **Browser upload**: click **Upload DK salaries** on the dashboard. It applies instantly and is remembered in that browser for the week.
+- **Shared (database) upload**: everyone sees it, and the next sync stores it.
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: text/csv"     --data-binary @DKSalaries.csv https://<your-app>/api/salaries
+  ```
+
+When a file is loaded, the pool is limited to that slate. Salaries, DraftKings IDs and injury status come from DraftKings, and projections stay from SportsDataIO. Players are matched by name and team, or by name and position if a player changed teams. Defenses have no SportsDataIO projection, so they use DraftKings' average points per game (marked "avg"). Unmatched players at other positions are dropped, because SportsDataIO leaving them out means it projects them at 0.
 
 ## Setup
 
@@ -47,6 +61,8 @@ npm run db:migrate
 | `GET /api/research` | Full slate: players, games, notices |
 | `GET /api/players` | Player pool only |
 | `GET /api/games` | This week's matchups |
+| `GET /api/salaries` | Uploaded DraftKings salary count for the week |
+| `POST/DELETE /api/salaries` | Replace or clear the week's DraftKings salaries (raw CSV body). Requires `Authorization: Bearer $CRON_SECRET`. |
 | `GET/POST /api/sync` | Writes the current SportsDataIO slate to Postgres. Requires `Authorization: Bearer $CRON_SECRET`. Runs daily via `vercel.json`. |
 
 ## Scripts

@@ -153,3 +153,24 @@ model UsageSnapshot {
 
   player          Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
 }
+
+/// Rows from an uploaded DraftKings salary CSV (DKSalaries.csv) for one week.
+model DkSalary {
+  id             String   @id
+  season         Int
+  week           Int
+  dkId           String
+  name           String
+  position       String
+  rosterPosition String
+  salary         Int
+  team           String
+  opponent       String?
+  kickoff        String?
+  gameInfo       String?
+  avgPoints      Float
+  status         String?
+  uploadedAt     DateTime @default(now())
+
+  @@index([season, week])
+}
