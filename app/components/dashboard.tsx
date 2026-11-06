@@ -5,6 +5,7 @@ import GamesTab from "@/app/components/games-tab";
 import LineupTab from "@/app/components/lineup-tab";
 import ResearchTab from "@/app/components/research-tab";
 import { applyDkSalariesToSlate, parseDkSalariesCsv } from "@/lib/dk-salaries";
+import { SLATE_OPTIONS, filterSlate, gameInSlate, type SlateFilter } from "@/lib/slates";
 import type { PoolPlayer, SlateData } from "@/lib/types";
 
 type Upload = { csv: string; uploadedAt: string; fileName: string };
@@ -23,6 +24,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
   const [upload, setUpload] = useState<Upload | null>(null);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("lineup");
+  const [slateFilter, setSlateFilter] = useState<SlateFilter>("all");
   const fileInput = useRef<HTMLInputElement>(null);
 
   // Browser-only state (saved upload, tab in the URL hash) is read after mount.
@@ -51,6 +53,12 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
       return initialSlate;
     }
   }, [initialSlate, upload]);
+
+  const slateView = useMemo(() => filterSlate(slate, slateFilter), [slate, slateFilter]);
+  const slateCounts = useMemo(
+    () => Object.fromEntries(SLATE_OPTIONS.map((o) => [o.id, slate.games.filter((g) => gameInSlate(g, o.id)).length])) as Record<SlateFilter, number>,
+    [slate.games],
+  );
 
   const topValue = useMemo(
     () => slate.players.filter((p) => p.salary > 0).reduce<PoolPlayer | null>((best, p) => (!best || p.value > best.value ? p : best), null),
@@ -154,12 +162,40 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
           ))}
         </nav>
 
+        {tab !== "games" && (
+          <div className="mb-6 flex flex-wrap items-center gap-2" role="group" aria-label="DraftKings slate">
+            <span className="mr-1 text-xs uppercase tracking-[0.2em] text-slate-500">DK slate</span>
+            {SLATE_OPTIONS.map((o) => {
+              const count = slateCounts[o.id];
+              const active = slateFilter === o.id;
+              return (
+                <button
+                  key={o.id}
+                  title={o.hint}
+                  disabled={count === 0}
+                  aria-pressed={active}
+                  onClick={() => setSlateFilter(o.id)}
+                  className={`rounded-full border px-3 py-1 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${
+                    active ? "border-sky-400 bg-sky-400 text-slate-950" : "border-slate-700 text-slate-300 hover:border-slate-500"
+                  }`}
+                >
+                  {o.label}
+                  <span className={active ? "ml-1 text-slate-800" : "ml-1 text-slate-500"}>{count}</span>
+                </button>
+              );
+            })}
+            <span className="text-xs text-slate-500">
+              {SLATE_OPTIONS.find((o) => o.id === slateFilter)?.hint} · {slateView.players.length} players
+            </span>
+          </div>
+        )}
+
         {/* Panels stay mounted so the lineup survives tab switches. */}
         <div role="tabpanel" id="panel-lineup" aria-labelledby="tab-lineup" hidden={tab !== "lineup"}>
-          <LineupTab key={upload?.uploadedAt ?? "base"} slate={slate} />
+          <LineupTab key={upload?.uploadedAt ?? "base"} slate={slateView} />
         </div>
         <div role="tabpanel" id="panel-research" aria-labelledby="tab-research" hidden={tab !== "research"}>
-          <ResearchTab slate={slate} />
+          <ResearchTab slate={slateView} />
         </div>
         <div role="tabpanel" id="panel-games" aria-labelledby="tab-games" hidden={tab !== "games"}>
           <GamesTab slate={slate} />

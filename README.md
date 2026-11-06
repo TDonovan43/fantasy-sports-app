@@ -10,6 +10,8 @@ The dashboard has three tabs (each linkable: `#lineup`, `#research`, `#games`):
 - **Projections**: the inputs behind each projection: weighted, season and last-3 DK points per game, the salary prior, base projection, matchup and Vegas adjustments, implied total, and position-specific per-game stats (passing, rushing, receiving; sacks, takeaways and points allowed for DST). Hover or tap a player to see the opposing defense's DK points allowed to each position, plus points, pass yards and rush yards allowed per game, each with a league rank. For a DST, the card shows the opposing offense instead.
 - **Games & weather**: each game's spread, moneylines, over/under, implied team totals and kickoff-hour forecast (temperature, wind, chance of precipitation, conditions; dome games are marked indoors). Wind of 15+ mph and precipitation chances of 50%+ are flagged.
 
+A **DK slate** selector on the Lineup builder and Projections tabs limits the pool, game strip and optimizer to one DraftKings Sunday Classic slate. **Early** is the Sunday 1:00 PM ET kickoffs, **Late** is 4:05/4:25 PM (DraftKings calls it Afternoon), and **Main** is both. Thursday, Sunday night, Monday and international morning games appear only under **All games**. DraftKings player IDs are specific to each slate, so for an Early- or Late-only contest, upload that contest's salary CSV before exporting a lineup.
+
 Players listed **OUT** or **IR** (DraftKings status or the nflverse injury report) are removed from the pool; the header shows how many were hidden.
 
 - **Player pool**: the full weekly pool with position tabs (QB/RB/WR/TE/FLEX/DST), search, a game filter (click a matchup), sortable columns, and per-player exclude.
