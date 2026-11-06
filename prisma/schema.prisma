@@ -1,0 +1,123 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Player {
+  id               String            @id @default(cuid())
+  name             String
+  firstName        String?
+  lastName         String?
+  team             String?
+  position         String
+  status           String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  salaries         PlayerSalary[]
+  projections      PlayerProjection[]
+  games            PlayerGameLog[]
+  injuries         InjuryStatus[]
+  usageSnapshots   UsageSnapshot[]
+}
+
+model Slate {
+  id            String         @id @default(cuid())
+  source        String
+  season        Int
+  week          Int
+  slateDate     DateTime
+  gameType      String
+  createdAt     DateTime       @default(now())
+  salaries      PlayerSalary[]
+  projections   PlayerProjection[]
+}
+
+model PlayerSalary {
+  id             String   @id @default(cuid())
+  playerId       String
+  slateId        String
+  source         String
+  salary         Int
+  rosterPosition String
+  isCaptain      Boolean? @default(false)
+  collectedAt    DateTime @default(now())
+
+  player         Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  slate          Slate  @relation(fields: [slateId], references: [id], onDelete: Cascade)
+}
+
+model PlayerProjection {
+  id                    String   @id @default(cuid())
+  playerId              String
+  slateId               String
+  source                String
+  projectedFantasyPoints Float
+  floor                 Float?
+  ceiling               Float?
+  projectedRushYds      Float?
+  projectedRushTds      Float?
+  projectedRecYds       Float?
+  projectedRecTds       Float?
+  projectedPassYds      Float?
+  projectedPassTds      Float?
+  projectedTargets      Float?
+  projectedSnaps        Float?
+  projectedOwnership    Float?
+  modelVersion          String
+  collectedAt           DateTime @default(now())
+
+  player                Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  slate                 Slate  @relation(fields: [slateId], references: [id], onDelete: Cascade)
+}
+
+model PlayerGameLog {
+  id              String   @id @default(cuid())
+  playerId        String
+  season          Int
+  week            Int
+  opponentTeamId  String?
+  passYds         Float?
+  passTds         Float?
+  rushYds         Float?
+  rushTds         Float?
+  recYds          Float?
+  recTds          Float?
+  targets         Float?
+  receptions      Float?
+  carries         Float?
+  snaps           Float?
+  fantasyPoints   Float
+  createdAt       DateTime @default(now())
+
+  player          Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+}
+
+model InjuryStatus {
+  id          String   @id @default(cuid())
+  playerId    String
+  status      String
+  description String?
+  updatedAt   DateTime @updatedAt
+  source      String
+
+  player      Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+}
+
+model UsageSnapshot {
+  id              String   @id @default(cuid())
+  playerId        String
+  season          Int
+  week            Int
+  snapShare       Float?
+  targetShare     Float?
+  redZoneTouches  Float?
+  goalLineTouches Float?
+  carryShare      Float?
+  routeRate       Float?
+  collectedAt     DateTime @default(now())
+
+  player          Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+}
