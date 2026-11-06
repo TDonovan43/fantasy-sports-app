@@ -63,7 +63,22 @@ export type PlayerResearch = {
   sacks?: number;
   takeaways?: number;
   pointsAllowed?: number;
+  /** Set when the player is a designated starter without enough recent games to project normally. */
+  limitedData?: {
+    /** Why he's treated as a starter. */
+    source: "depth chart" | "manual";
+    /** Past games (any season loaded) with a real role, and their average DK points. */
+    historyGames: number;
+    historyAvg: number | null;
+    /** Points expected from the role (e.g. the team's QB production this season). */
+    roleBaseline: number;
+  };
+  /** True when this player is the team's starter only because of a manual override. */
+  manualStarter?: boolean;
 };
+
+/** A player the user marked as starting (browser-only override). */
+export type StarterOverride = { name: string; team: string; position: OffensePosition };
 
 export type OffensePosition = "QB" | "RB" | "WR" | "TE";
 
@@ -134,6 +149,8 @@ export type SlateData = {
   teams?: Record<string, TeamProfile>;
   /** Count of players hidden because they are listed OUT or IR. */
   hiddenInactive?: number;
+  /** DraftKings players on the slate with no projection (no recent games), not OUT/IR. */
+  unprojected?: PoolPlayer[];
   /** Set when salaries come from an uploaded DraftKings CSV. */
   dkSalaries: { uploadedAt: string; players: number } | null;
 };

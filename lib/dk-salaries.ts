@@ -25,6 +25,8 @@ export type DkMergeResult = {
   avgOnly: number;
   /** DK rows dropped: no projection from the source (usually inactive or deep reserves). */
   skipped: number;
+  /** The dropped rows as zero-projection players, so they can still be picked or marked as starting. */
+  unprojected: PoolPlayer[];
 };
 
 const INACTIVE_STATUSES = new Set(["OUT", "IR", "D", "DOUBTFUL", "SUSPENDED", "PUP", "NFI", "O"]);
@@ -43,9 +45,10 @@ export function isOutOrIr(injury: string | null | undefined) {
 /** Removes OUT/IR players from a slate, counting how many were hidden. */
 export function hideOutAndIr(slate: SlateData): SlateData {
   const players = slate.players.filter((p) => !isOutOrIr(p.injury));
+  const unprojected = slate.unprojected?.filter((p) => !isOutOrIr(p.injury));
   const removed = slate.players.length - players.length;
-  if (removed === 0) return slate;
-  return { ...slate, players, hiddenInactive: (slate.hiddenInactive ?? 0) + removed };
+  if (removed === 0 && unprojected?.length === slate.unprojected?.length) return slate;
+  return { ...slate, players, unprojected, hiddenInactive: (slate.hiddenInactive ?? 0) + removed };
 }
 
 /** "DET@MIA 11/08/2026 01:00PM ET" -> teams and an Eastern wall-clock ISO string. */
@@ -141,6 +144,7 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
   let avgOnly = 0;
   let skipped = 0;
   const players: PoolPlayer[] = [];
+  const unprojected: PoolPlayer[] = [];
 
   for (const row of rows) {
     const key = normalizeName(row.name);
@@ -154,6 +158,22 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
     const projected = source ? source.projected : useAverage ? round1(Math.max(0, row.avgPoints)) : 0;
     if (projected <= 0) {
       skipped++;
+      unprojected.push({
+        id: `dk-${row.dkId}`,
+        dkId: row.dkId,
+        name: row.name,
+        position: row.position,
+        team: row.team,
+        opponent: row.opponent,
+        gameKey: row.gameInfo,
+        salary: row.salary,
+        projected: 0,
+        floor: 0,
+        ceiling: 0,
+        rangeEstimated: true,
+        value: 0,
+        injury: row.status ?? source?.injury ?? null,
+      });
       continue;
     }
     if (source) matched++;
@@ -179,7 +199,7 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
     });
   }
 
-  return { players, matched, avgOnly, skipped };
+  return { players, matched, avgOnly, skipped, unprojected };
 }
 
 export const NOTICE_TRIAL = "SportsDataIO trial key detected: projections, salaries and lines are scrambled sample values.";
@@ -198,7 +218,13 @@ export function applyDkSalariesToSlate(slate: SlateData, rows: DkSalaryRow[], up
   if (slate.notices.includes(NOTICE_TRIAL)) {
     notices.unshift("SportsDataIO trial key detected: projections and lines are scrambled sample values. Salaries are real.");
   }
-  return hideOutAndIr({ ...slate, players: merged.players, notices, dkSalaries: { uploadedAt, players: rows.length } });
+  return hideOutAndIr({
+    ...slate,
+    players: merged.players,
+    unprojected: merged.unprojected,
+    notices,
+    dkSalaries: { uploadedAt, players: rows.length },
+  });
 }
 
 /** Row lookup over DK rows (name+team, then name+position; defenses by team). */

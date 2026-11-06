@@ -12,6 +12,8 @@ The dashboard has three tabs (each linkable: `#lineup`, `#research`, `#games`):
 
 A **DK slate** selector on the Lineup builder and Projections tabs limits the pool, game strip and optimizer to one DraftKings Sunday Classic slate. **Early** is the Sunday 1:00 PM ET kickoffs, **Late** is 4:05/4:25 PM (DraftKings calls it Afternoon), and **Main** is both. Thursday, Sunday night, Monday and international morning games appear only under **All games**. DraftKings player IDs are specific to each slate, so for an Early- or Late-only contest, upload that contest's salary CSV before exporting a lineup.
 
+**Show unprojected** lists DraftKings players with no projection; you can add them to a lineup by hand, but the optimizer only uses them if you have. **Mark starting** (on QBs and unprojected players) tells the model to treat a player as this week's starter, for news that breaks before Sleeper updates. Overrides are saved in your browser for the week and sent to `/api/research?starters=[...]`, which recalculates the slate. Marking a QB demotes the team's other QBs to backup.
+
 Players listed **OUT** or **IR** (DraftKings status or the nflverse injury report) are removed from the pool; the header shows how many were hidden.
 
 - **Player pool**: the full weekly pool with position tabs (QB/RB/WR/TE/FLEX/DST), search, a game filter (click a matchup), sortable columns, and per-player exclude.
@@ -43,7 +45,9 @@ Inputs: weekly player stats for this season and last, the schedule (with closing
 2. **Recency-weighted average**, with weight 0.95^games-ago, and last season's games at 0.7×. Games where a regular left early (usage under 30% of their median) are ignored.
 3. **Shrinkage** toward a salary-implied prior, worth 1 game. The prior is a per-position regression of points on DraftKings salary, used when salaries are loaded.
 4. **Matchup adjustment**: the geometric mean of (a) DraftKings points the opponent allows to the position, against the league average, and (b) the Vegas implied team total, against the team's season scoring. Both are shrunk and clamped.
-5. **Starting QB**: the QB with the most attempts in the team's latest game is the starter, and other QBs keep 10% of their projection. If the starter is OUT (per the nflverse injury report or DraftKings' status), the backup is promoted and shrunk harder toward his salary-implied prior, since his own sample is relief work.
+5. **Starting QB**: a manual override wins; otherwise it's the first healthy QB on [Sleeper's](https://docs.sleeper.com) depth chart (free public feed, cached 6 hours); otherwise the QB with the most attempts in the team's latest game. Other QBs keep 10% of their projection. A backup promoted to starter is shrunk harder toward his salary-implied prior, since his own sample is relief work.
+   - **Limited-data starters**: a designated starter with fewer than 2 real games this season (e.g. a newly named QB) is projected from his real games across the last three seasons (QB: 15+ attempts; RB: 8+ touches/targets; WR/TE: 4+ targets). Those are blended with a role baseline worth 3 games: 90% of the team's QB production this season, or 85% of the depth-chart starter's average for other positions. Then the usual matchup and Vegas adjustments apply. These players are tagged "limited data" with the breakdown.
+   - **Injury status** comes from DraftKings first, then the nflverse injury report, then Sleeper.
 6. **Floor and ceiling** come from the player's own game-to-game spread (blended with a positional default): the 20th and 90th percentiles.
 7. **DST** uses DraftKings defense scoring (sacks, turnovers, defensive and return TDs, safeties, blocks, points-allowed tiers), adjusted for the opponent offense and its implied total.
 

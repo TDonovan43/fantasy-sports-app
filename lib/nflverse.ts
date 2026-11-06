@@ -1,7 +1,8 @@
 import { parseCsvObjects } from "@/lib/csv";
-import { isInactive } from "@/lib/dk-salaries";
+import { isInactive, normalizeName } from "@/lib/dk-salaries";
+import type { DepthInfo } from "@/lib/sleeper";
 import { round1, round2 } from "@/lib/sportsdataio";
-import type { Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, TeamProfile } from "@/lib/types";
+import type { Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, StarterOverride, TeamProfile } from "@/lib/types";
 
 /**
  * FieldGoal projection model built on nflverse data (https://github.com/nflverse/nflverse-data).
@@ -57,9 +58,11 @@ function fetchCsv(url: string): Promise<Row[]> {
 }
 
 export async function loadNflverseData(season: number): Promise<NflverseData> {
-  const [current, prior, schedule, injuries] = await Promise.all([
+  const [current, prior, older, schedule, injuries] = await Promise.all([
     fetchCsv(`${RELEASES}/stats_player/stats_player_week_${season}.csv`),
     fetchCsv(`${RELEASES}/stats_player/stats_player_week_${season - 1}.csv`),
+    // Two seasons back: only used as history for starters with little recent data.
+    fetchCsv(`${RELEASES}/stats_player/stats_player_week_${season - 2}.csv`),
     fetchCsv(`${RELEASES}/schedules/games.csv`),
     fetchCsv(`${RELEASES}/injuries/injuries_${season}.csv`),
   ]);
@@ -67,6 +70,7 @@ export async function loadNflverseData(season: number): Promise<NflverseData> {
     stats: new Map([
       [season, current],
       [season - 1, prior],
+      [season - 2, older],
     ]),
     schedule,
     injuries,
@@ -145,6 +149,10 @@ type PlayerGame = {
 const BACKUP_QB_FACTOR = 0.1;
 /** Pseudo-games of salary prior for a backup QB promoted to starter (his own sample is relief work). */
 const PROMOTED_QB_SHRINK = 6;
+/** Pseudo-games of role baseline blended into a limited-data starter's own history. */
+const LIMITED_SHRINK = 3;
+/** A designated starter with fewer real games than this this season uses the limited-data path. */
+const LIMITED_MIN_GAMES = 2;
 
 type TeamGame = {
   team: string;
@@ -338,15 +346,49 @@ function buildTeamProfiles(seasonGames: TeamGame[], allowed: Map<string, Map<str
 }
 
 /** Pure projection step: projects `week` of `season` using only games before it. */
-export function projectWeek(
-  data: NflverseData,
-  season: number,
-  week: number,
-  salaryOf?: SalaryLookup,
-  model: ModelOptions = DEFAULT_MODEL,
-  statusOf?: StatusLookup,
-): ProjectionResult {
+export type ProjectContext = {
+  salaryOf?: SalaryLookup;
+  statusOf?: StatusLookup;
+  model?: ModelOptions;
+  /** Sleeper depth charts and injury status. */
+  depth?: DepthInfo[] | null;
+  /** Players the user marked as starting. */
+  starters?: StarterOverride[];
+};
+
+function toPlayerGame(r: Row, season: number, week: number, team: string, opponent: string, position: Position): PlayerGame {
+  return {
+    playerId: r.player_id,
+    name: r.player_display_name || r.player_name,
+    position,
+    team,
+    opponent,
+    gameId: r.game_id,
+    season,
+    week,
+    points: dkOffensePoints(r),
+    usage: n(r.attempts) + n(r.carries) + n(r.targets),
+    attempts: n(r.attempts),
+    passYds: n(r.passing_yards),
+    passTds: n(r.passing_tds),
+    rushYds: n(r.rushing_yards),
+    rushAtt: n(r.carries),
+    recYds: n(r.receiving_yards),
+    targets: n(r.targets),
+    receptions: n(r.receptions),
+  };
+}
+
+/** A game where the player had a real role (not a relief or garbage-time appearance). */
+const isRealGame = (g: PlayerGame) =>
+  g.position === "QB" ? g.attempts >= 15 : g.position === "RB" ? g.rushAtt + g.targets >= 8 : g.targets >= 4;
+
+export function projectWeek(data: NflverseData, season: number, week: number, ctx: ProjectContext = {}): ProjectionResult {
+  const { salaryOf, statusOf, depth, starters = [] } = ctx;
+  const model = ctx.model ?? DEFAULT_MODEL;
   const { decay: RECENCY_DECAY, priorSeasonWeight: PRIOR_SEASON_WEIGHT, shrinkGames: SHRINK_GAMES, skipCompletedGames = true } = model;
+  const depthByNameTeam = new Map((depth ?? []).map((d) => [`${normalizeName(d.name)}|${d.team}`, d]));
+  const olderGames: PlayerGame[] = [];
   const schedule = parseSchedule(data.schedule);
   const isPast = (s: number, w: number) => s < season || (s === season && w < week);
 
@@ -373,6 +415,11 @@ export function projectWeek(
       if (!isPast(s, w)) continue;
       const team = teamAbbr(r.team);
       const opponent = teamAbbr(r.opponent_team);
+      const offensePos = toOffensePosition(r.position);
+      if (s < season - 1) {
+        if (offensePos) olderGames.push(toPlayerGame(r, s, w, team, opponent, offensePos));
+        continue;
+      }
 
       // Every player's defensive/special-teams contributions roll up into their team's DST.
       const key = `${r.game_id}|${team}`;
@@ -392,28 +439,8 @@ export function projectWeek(
         (n(r.def_tds) + n(r.special_teams_tds)) * 6;
       dstByTeamGame.set(key, dst);
 
-      const position = toOffensePosition(r.position);
-      if (!position) continue;
-      playerGames.push({
-        playerId: r.player_id,
-        name: r.player_display_name || r.player_name,
-        position,
-        team,
-        opponent,
-        gameId: r.game_id,
-        season: s,
-        week: w,
-        points: dkOffensePoints(r),
-        usage: n(r.attempts) + n(r.carries) + n(r.targets),
-        attempts: n(r.attempts),
-        passYds: n(r.passing_yards),
-        passTds: n(r.passing_tds),
-        rushYds: n(r.rushing_yards),
-        rushAtt: n(r.carries),
-        recYds: n(r.receiving_yards),
-        targets: n(r.targets),
-        receptions: n(r.receptions),
-      });
+      if (!offensePos) continue;
+      playerGames.push(toPlayerGame(r, s, w, team, opponent, offensePos));
     }
   }
 
@@ -511,7 +538,16 @@ export function projectWeek(
     if (n(r.season) === season && n(r.week) === week && r.report_status) injuryStatus.set(r.gsis_id, r.report_status);
   }
 
-  // Starting QB = most pass attempts in the team's latest game this season.
+  /** DraftKings status first, then the nflverse injury report, then Sleeper. */
+  function statusFor(playerId: string, name: string, team: string, position: Position): string | null {
+    const dk = statusOf?.(name, team, position);
+    if (dk) return dk;
+    const nfl = injuryStatus.get(playerId);
+    if (nfl) return nfl.toLowerCase() === "out" ? "OUT" : nfl;
+    return depthByNameTeam.get(`${normalizeName(name)}|${team}`)?.injury ?? null;
+  }
+
+  // Last-game starter: most pass attempts in the team's latest game this season.
   const starterQb = new Map<string, { playerId: string; name: string; week: number; attempts: number }>();
   for (const g of playerGames) {
     if (g.season !== season || g.position !== "QB") continue;
@@ -520,12 +556,30 @@ export function projectWeek(
       starterQb.set(g.team, { playerId: g.playerId, name: g.name, week: g.week, attempts: g.attempts });
     }
   }
-  function qbRole(playerId: string, team: string): { factor: number; promoted: boolean } {
-    const starter = starterQb.get(team);
-    if (!starter || starter.playerId === playerId) return { factor: 1, promoted: false };
+
+  /** This week's starting QB: manual override, else Sleeper's first healthy QB on the depth chart. */
+  function designatedQb(team: string): { name: string; source: "depth chart" | "manual" } | null {
+    const manual = [...starters].reverse().find((o) => o.team === team && o.position === "QB");
+    if (manual) return { name: manual.name, source: "manual" };
+    const chart = (depth ?? [])
+      .filter((d) => d.team === team && d.position === "QB" && d.depthOrder !== null)
+      .sort((a, b) => a.depthOrder! - b.depthOrder!);
+    for (const d of chart) {
+      if (!isInactive(statusFor("", d.name, team, "QB"))) return { name: d.name, source: "depth chart" };
+    }
+    return null;
+  }
+
+  function qbRole(playerId: string, name: string, team: string): { factor: number; promoted: boolean } {
+    const lastStarter = starterQb.get(team);
+    const designated = designatedQb(team);
+    if (designated) {
+      if (normalizeName(designated.name) !== normalizeName(name)) return { factor: BACKUP_QB_FACTOR, promoted: false };
+      return { factor: 1, promoted: !!lastStarter && lastStarter.playerId !== playerId };
+    }
+    if (!lastStarter || lastStarter.playerId === playerId) return { factor: 1, promoted: false };
     // Backup becomes the starter if the incumbent is ruled out this week.
-    const starterOut =
-      injuryStatus.get(starter.playerId)?.toLowerCase() === "out" || isInactive(statusOf?.(starter.name, team, "QB"));
+    const starterOut = isInactive(statusFor(lastStarter.playerId, lastStarter.name, team, "QB"));
     return starterOut ? { factor: 1, promoted: true } : { factor: BACKUP_QB_FACTOR, promoted: false };
   }
 
@@ -594,7 +648,7 @@ export function projectWeek(
     const salary = salaryOf?.(c.name, c.team, c.position) ?? 0;
     const priorFn = priors.get(c.position);
     const prior = salary > 0 && priorFn ? priorFn(salary) : Math.min(c.mean, fallbackPrior(c.position));
-    const role = c.position === "QB" ? qbRole(c.id, c.team) : { factor: 1, promoted: false };
+    const role = c.position === "QB" ? qbRole(c.id, c.name, c.team) : { factor: 1, promoted: false };
     const shrink = role.promoted && salary > 0 && priorFn ? PROMOTED_QB_SHRINK : SHRINK_GAMES;
     const base = (c.sumW * c.mean + shrink * prior) / (c.sumW + shrink);
 
@@ -606,7 +660,7 @@ export function projectWeek(
 
     const cvSd = POSITION_CV[c.position] * projected;
     const sd = Math.sqrt((c.sumW * (c.sd * adj) ** 2 + SHRINK_GAMES * cvSd ** 2) / (c.sumW + SHRINK_GAMES));
-    const status = injuryStatus.get(c.id);
+    const status = statusFor(c.id, c.name, c.team, c.position);
     const avg = (pick: (g: PlayerGame) => number) => round1(perGame(c.current, pick));
     const research: PlayerResearch = {
       games: c.current.length,
@@ -642,8 +696,122 @@ export function projectWeek(
       ceiling: round1(projected + 1.28 * sd),
       rangeEstimated: false,
       value: salary > 0 ? round2(projected / (salary / 1000)) : 0,
-      injury: status ? (status.toLowerCase() === "out" ? "OUT" : status) : null,
+      injury: status,
     });
+  }
+
+  // ---- Designated starters with little or no recent data --------------------------------------------
+  const historyByName = new Map<string, PlayerGame[]>();
+  for (const g of [...playerGames, ...olderGames]) {
+    const key = `${normalizeName(g.name)}|${g.position}`;
+    const list = historyByName.get(key);
+    if (list) list.push(g);
+    else historyByName.set(key, [g]);
+  }
+
+  /** Points the starting role is worth on this team (QB: the team's QB production this season). */
+  function roleBaseline(team: string, position: OffensePosition, excludeKey: string) {
+    if (position === "QB") {
+      const byTeamGame = new Map<string, number>();
+      for (const g of playerGames) {
+        if (g.season !== season || g.position !== "QB") continue;
+        byTeamGame.set(`${g.team}|${g.gameId}`, (byTeamGame.get(`${g.team}|${g.gameId}`) ?? 0) + g.points);
+      }
+      const teamValues = [...byTeamGame.entries()].filter(([k]) => k.startsWith(`${team}|`)).map(([, v]) => v);
+      const values = teamValues.length ? teamValues : [...byTeamGame.values()];
+      // A replacement starter typically produces a bit less than the team's season QB average.
+      return 0.9 * perGame(values, (x) => x);
+    }
+    const starter = (depth ?? []).find(
+      (d) => d.team === team && d.position === position && d.depthOrder === 1 && normalizeName(d.name) !== excludeKey,
+    );
+    const starterPlayer =
+      starter && players.find((p) => p.team === team && p.position === position && normalizeName(p.name) === normalizeName(starter.name));
+    if (starterPlayer?.research) return 0.85 * starterPlayer.research.weightedAvg;
+    const regulars = candidates.filter((c) => c.position === position && c.sumW >= 3).map((c) => c.mean).sort((a, b) => a - b);
+    return regulars.length ? regulars[Math.floor(regulars.length * 0.6)] : 8;
+  }
+
+  const designated: { name: string; team: string; position: OffensePosition; source: "depth chart" | "manual" }[] = [];
+  for (const [team, m] of matchupByTeam) {
+    if (skipCompletedGames && m.game.homeScore !== null) continue;
+    const qb = designatedQb(team);
+    if (qb) designated.push({ ...qb, team, position: "QB" });
+  }
+  for (const o of starters) {
+    const m = matchupByTeam.get(o.team);
+    if (o.position !== "QB" && m && !(skipCompletedGames && m.game.homeScore !== null)) {
+      designated.push({ name: o.name, team: o.team, position: o.position, source: "manual" });
+    }
+  }
+
+  for (const d of designated) {
+    const key = normalizeName(d.name);
+    const idx = players.findIndex((p) => p.position === d.position && p.team === d.team && normalizeName(p.name) === key);
+    const history = (historyByName.get(`${key}|${d.position}`) ?? []).sort((a, b) => b.season - a.season || b.week - a.week);
+    const realCurrent = history.filter((g) => g.season === season && isRealGame(g)).length;
+
+    if (idx >= 0 && realCurrent >= LIMITED_MIN_GAMES) {
+      // Enough of his own data: keep the normal projection, just note a manual override.
+      if (d.source === "manual" && players[idx].research) {
+        players[idx] = { ...players[idx], research: { ...players[idx].research!, manualStarter: true } };
+      }
+      continue;
+    }
+
+    const real = history.filter(isRealGame);
+    const hist = weightedStats(real.map((g, i) => ({ value: g.points, weight: 0.9 ** i })));
+    const role = roleBaseline(d.team, d.position, key);
+    const count = real.length;
+    const base = count ? (count * hist.mean + LIMITED_SHRINK * role) / (count + LIMITED_SHRINK) : role;
+    const m = matchupByTeam.get(d.team)!;
+    const opp = oppFactor(m.opponent, d.position);
+    const vegas = m.implied !== null ? clamp(m.implied / teamPpg(d.team), 0.8, 1.25) : null;
+    const projected = round1(base * (vegas !== null ? Math.sqrt(opp * vegas) : opp));
+    // Wider range than usual: we know less about this player.
+    const sd = POSITION_CV[d.position] * 1.2 * projected;
+    const salary = salaryOf?.(d.name, d.team, d.position) ?? 0;
+    const current = history.filter((g) => g.season === season);
+    const statGames = current.length ? current : real;
+    const avg = (pick: (g: PlayerGame) => number) => round1(perGame(statGames, pick));
+    const prev = idx >= 0 ? players[idx] : null;
+
+    const player: PoolPlayer = {
+      id: prev?.id ?? (history[0] ? `nfl-${history[0].playerId}` : `nfl-${d.team}-${key.replace(/\s+/g, "-")}`),
+      name: prev?.name ?? d.name,
+      position: d.position,
+      team: d.team,
+      opponent: m.opponent,
+      gameKey: m.game.gameId,
+      salary,
+      projected,
+      floor: round1(Math.max(0, projected - 0.84 * sd)),
+      ceiling: round1(projected + 1.28 * sd),
+      rangeEstimated: false,
+      value: salary > 0 ? round2(projected / (salary / 1000)) : 0,
+      injury: statusFor(history[0]?.playerId ?? "", d.name, d.team, d.position),
+      research: {
+        games: current.length,
+        seasonAvg: round1(perGame(current, (g) => g.points)),
+        last3Avg: round1(perGame(current.slice(0, 3), (g) => g.points)),
+        weightedAvg: round1(hist.mean),
+        salaryPrior: null,
+        baseProjection: round1(base),
+        matchupFactor: round2(opp),
+        vegasFactor: vegas === null ? null : round2(vegas),
+        impliedTotal: m.implied === null ? null : round1(m.implied),
+        roleFactor: 1,
+        ...(d.position === "QB"
+          ? { passYds: avg((g) => g.passYds), passTds: round2(perGame(statGames, (g) => g.passTds)), passAtt: avg((g) => g.attempts) }
+          : { recYds: avg((g) => g.recYds), targets: avg((g) => g.targets), receptions: avg((g) => g.receptions) }),
+        rushYds: avg((g) => g.rushYds),
+        rushAtt: avg((g) => g.rushAtt),
+        limitedData: { source: d.source, historyGames: count, historyAvg: count ? round1(hist.mean) : null, roleBaseline: round1(role) },
+        manualStarter: d.source === "manual",
+      },
+    };
+    if (idx >= 0) players[idx] = player;
+    else players.push(player);
   }
 
   // ---- Team defenses -------------------------------------------------------------------------------

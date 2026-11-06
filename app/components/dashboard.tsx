@@ -6,7 +6,8 @@ import LineupTab from "@/app/components/lineup-tab";
 import ResearchTab from "@/app/components/research-tab";
 import { applyDkSalariesToSlate, parseDkSalariesCsv } from "@/lib/dk-salaries";
 import { SLATE_OPTIONS, filterSlate, gameInSlate, type SlateFilter } from "@/lib/slates";
-import type { PoolPlayer, SlateData } from "@/lib/types";
+import { matchesOverride, toggleOverride, type StarterControls } from "@/lib/starters";
+import type { PoolPlayer, SlateData, StarterOverride } from "@/lib/types";
 
 type Upload = { csv: string; uploadedAt: string; fileName: string };
 
@@ -25,6 +26,12 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>("lineup");
   const [slateFilter, setSlateFilter] = useState<SlateFilter>("all");
+  const [showUnprojected, setShowUnprojected] = useState(false);
+  const startersKey = `fieldgoal-starters-${initialSlate.season}-${initialSlate.week}`;
+  const [starters, setStarters] = useState<StarterOverride[]>([]);
+  /** Slate recalculated by the server with the overrides, keyed by the overrides it used. */
+  const [recalculated, setRecalculated] = useState<{ key: string; slate: SlateData } | null>(null);
+  const [recalcError, setRecalcError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   // Browser-only state (saved upload, tab in the URL hash) is read after mount.
@@ -35,10 +42,54 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
     try {
       const raw = localStorage.getItem(storageKey);
       if (raw) setUpload(JSON.parse(raw) as Upload);
+      const savedStarters = localStorage.getItem(startersKey);
+      if (savedStarters) setStarters(JSON.parse(savedStarters) as StarterOverride[]);
     } catch {
-      // Storage unavailable; uploads just won't persist.
+      // Storage unavailable; uploads and overrides just won't persist.
     }
-  }, [storageKey]);
+  }, [storageKey, startersKey]);
+
+  const overridesParam = starters.length ? JSON.stringify(starters) : "";
+
+  // Ask the server to re-project with the players marked as starting.
+  useEffect(() => {
+    if (!overridesParam) return;
+    let cancelled = false;
+    fetch(`/api/research?starters=${encodeURIComponent(overridesParam)}`)
+      .then((res) => (res.ok ? (res.json() as Promise<SlateData>) : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((next) => {
+        if (cancelled) return;
+        setRecalculated({ key: overridesParam, slate: next });
+        setRecalcError(null);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setRecalcError(`Couldn't recalculate projections (${error instanceof Error ? error.message : "network error"}).`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [overridesParam]);
+
+  const baseSlate = overridesParam && recalculated?.key === overridesParam ? recalculated.slate : initialSlate;
+  const pending = !!overridesParam && recalculated?.key !== overridesParam && !recalcError;
+
+  function updateStarters(next: StarterOverride[]) {
+    setStarters(next);
+    try {
+      if (next.length) localStorage.setItem(startersKey, JSON.stringify(next));
+      else localStorage.removeItem(startersKey);
+    } catch {
+      // ignore
+    }
+  }
+
+  const starterControls: StarterControls = {
+    starters,
+    pending,
+    isMarked: (p) => starters.some((o) => matchesOverride(o, p)),
+    canMark: (p) => p.position !== "DST" && (p.position === "QB" || p.projected === 0 || !!p.research?.manualStarter || !!p.research?.limitedData),
+    toggle: (p) => updateStarters(toggleOverride(starters, p)),
+  };
 
   function selectTab(id: TabId) {
     setTab(id);
@@ -46,13 +97,13 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
   }
 
   const slate = useMemo(() => {
-    if (!upload) return initialSlate;
+    if (!upload) return baseSlate;
     try {
-      return applyDkSalariesToSlate(initialSlate, parseDkSalariesCsv(upload.csv), upload.uploadedAt);
+      return applyDkSalariesToSlate(baseSlate, parseDkSalariesCsv(upload.csv), upload.uploadedAt);
     } catch {
-      return initialSlate;
+      return baseSlate;
     }
-  }, [initialSlate, upload]);
+  }, [baseSlate, upload]);
 
   const slateView = useMemo(() => filterSlate(slate, slateFilter), [slate, slateFilter]);
   const slateCounts = useMemo(
@@ -187,15 +238,42 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
             <span className="text-xs text-slate-500">
               {SLATE_OPTIONS.find((o) => o.id === slateFilter)?.hint} · {slateView.players.length} players
             </span>
+            <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-slate-300">
+              <input
+                type="checkbox"
+                checked={showUnprojected}
+                onChange={(e) => setShowUnprojected(e.target.checked)}
+                className="h-4 w-4 accent-emerald-400"
+              />
+              Show unprojected ({slateView.unprojected?.length ?? 0})
+            </label>
+          </div>
+        )}
+
+        {(starters.length > 0 || recalcError) && tab !== "games" && (
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-sky-500/30 bg-sky-500/5 px-4 py-2 text-sm text-sky-200">
+            <span className="font-semibold">Marked starting:</span>
+            {starters.map((o) => (
+              <span key={`${o.team}-${o.position}-${o.name}`} className="rounded-full border border-sky-400/40 px-2 py-0.5 text-xs">
+                {o.name} ({o.team} {o.position})
+              </span>
+            ))}
+            {pending && <span className="text-xs text-sky-300">Recalculating…</span>}
+            {recalcError && <span className="text-xs text-rose-300">{recalcError}</span>}
+            {starters.length > 0 && (
+              <button onClick={() => updateStarters([])} className="ml-auto text-xs text-sky-300 hover:text-white">
+                Clear all
+              </button>
+            )}
           </div>
         )}
 
         {/* Panels stay mounted so the lineup survives tab switches. */}
         <div role="tabpanel" id="panel-lineup" aria-labelledby="tab-lineup" hidden={tab !== "lineup"}>
-          <LineupTab key={upload?.uploadedAt ?? "base"} slate={slateView} />
+          <LineupTab key={upload?.uploadedAt ?? "base"} slate={slateView} showUnprojected={showUnprojected} starterControls={starterControls} />
         </div>
         <div role="tabpanel" id="panel-research" aria-labelledby="tab-research" hidden={tab !== "research"}>
-          <ResearchTab slate={slateView} />
+          <ResearchTab slate={slateView} showUnprojected={showUnprojected} starterControls={starterControls} />
         </div>
         <div role="tabpanel" id="panel-games" aria-labelledby="tab-games" hidden={tab !== "games"}>
           <GamesTab slate={slate} />

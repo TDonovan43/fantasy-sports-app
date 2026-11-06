@@ -7,6 +7,7 @@ import {
   hideOutAndIr,
   type DkSalaryRow,
 } from "@/lib/dk-salaries";
+import { loadSleeperDepth } from "@/lib/sleeper";
 import { getGameWeather } from "@/lib/weather";
 import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
@@ -20,7 +21,37 @@ import {
   round2,
   toPosition,
 } from "@/lib/sportsdataio";
-import type { Matchup, PoolPlayer, Position, SlateData } from "@/lib/types";
+import type { Matchup, OffensePosition, PoolPlayer, Position, SlateData, StarterOverride } from "@/lib/types";
+
+export type SlateOptions = {
+  /** Players the user marked as starting (manual overrides). */
+  starters?: StarterOverride[];
+};
+
+const OVERRIDE_POSITIONS = new Set<OffensePosition>(["QB", "RB", "WR", "TE"]);
+
+/** Parses the `starters` query param: JSON array of {name, team, position}. Invalid entries are dropped. */
+export function parseStarterOverrides(raw: string | null): StarterOverride[] {
+  if (!raw) return [];
+  try {
+    const list: unknown = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list
+      .slice(0, 25)
+      .filter(
+        (o): o is StarterOverride =>
+          !!o &&
+          typeof o.name === "string" &&
+          typeof o.team === "string" &&
+          OVERRIDE_POSITIONS.has(o.position) &&
+          o.name.length <= 60 &&
+          o.team.length <= 4,
+      )
+      .map((o) => ({ name: o.name, team: o.team.toUpperCase(), position: o.position }));
+  } catch {
+    return [];
+  }
+}
 
 export const DK_CLASSIC_CAP = 50000;
 export const SLATE_GAME_TYPE = "DraftKings Classic";
@@ -299,8 +330,8 @@ export async function withStoredDkSalaries(slate: SlateData): Promise<SlateData>
   return stored ? applyDkSalariesToSlate(slate, stored.rows, stored.uploadedAt) : slate;
 }
 
-export async function getSlateData(): Promise<SlateData> {
-  return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate()));
+export async function getSlateData(options: SlateOptions = {}): Promise<SlateData> {
+  return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate(options)));
 }
 
 /**
@@ -316,21 +347,20 @@ export async function resolveSeasonWeek(): Promise<{ season: number; week: numbe
 }
 
 /** Live slate projected by the FieldGoal model on nflverse data, or null if the data is unavailable. */
-export async function getNflverseSlate(): Promise<SlateData | null> {
+export async function getNflverseSlate(options: SlateOptions = {}): Promise<SlateData | null> {
   try {
     const { season, week } = await resolveSeasonWeek();
-    const data = await loadNflverseData(season);
+    const [data, depth] = await Promise.all([loadNflverseData(season), loadSleeperDepth()]);
     if (!data.stats.get(season)?.length || data.schedule.length === 0) return null;
 
     const stored = await getStoredDkSalaries(season, week);
-    const result = projectWeek(
-      data,
-      season,
-      week,
-      stored ? buildSalaryLookup(stored.rows) : undefined,
-      DEFAULT_MODEL,
-      stored ? buildStatusLookup(stored.rows) : undefined,
-    );
+    const result = projectWeek(data, season, week, {
+      salaryOf: stored ? buildSalaryLookup(stored.rows) : undefined,
+      statusOf: stored ? buildStatusLookup(stored.rows) : undefined,
+      model: DEFAULT_MODEL,
+      depth,
+      starters: options.starters,
+    });
     if (result.players.length === 0) return null;
 
     const notices = [
@@ -338,6 +368,9 @@ export async function getNflverseSlate(): Promise<SlateData | null> {
       result.hasLines
         ? "Spreads and totals come from the nflverse schedule."
         : "No betting lines are posted for this week yet, so projections use only the opponent adjustment.",
+      depth
+        ? "Starting QBs and injury status come from Sleeper's depth charts. Starters without enough recent games are projected from past games plus the team's role baseline (tagged \"limited data\")."
+        : "Sleeper depth charts are unavailable right now, so starting QBs are taken from each team's last game.",
     ];
     const weather = await getGameWeather(result.venues);
     const games = result.games.map((g) => {
@@ -373,16 +406,16 @@ function projectionPreference(): ProjectionPreference {
  * "auto" (default) prefers a paid SportsDataIO key and falls back to the nflverse model when the
  * key is missing or a trial key (scrambled data).
  */
-export async function getLiveSlate(): Promise<SlateData | null> {
+export async function getLiveSlate(options: SlateOptions = {}): Promise<SlateData | null> {
   const pref = projectionPreference();
   let live: SlateData | null;
   if (pref === "nflverse") {
-    live = (await getNflverseSlate()) ?? (await getSportsDataIOSlate());
+    live = (await getNflverseSlate(options)) ?? (await getSportsDataIOSlate());
   } else if (pref === "sportsdataio") {
-    live = (await getSportsDataIOSlate()) ?? (await getNflverseSlate());
+    live = (await getSportsDataIOSlate()) ?? (await getNflverseSlate(options));
   } else {
     const sdio = await getSportsDataIOSlate();
-    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : ((await getNflverseSlate()) ?? sdio);
+    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : ((await getNflverseSlate(options)) ?? sdio);
   }
   if (live) return live;
 
@@ -394,8 +427,8 @@ export async function getLiveSlate(): Promise<SlateData | null> {
   return null;
 }
 
-async function getBaseSlate(): Promise<SlateData> {
-  const live = await getLiveSlate();
+async function getBaseSlate(options: SlateOptions): Promise<SlateData> {
+  const live = await getLiveSlate(options);
   if (live) return live;
 
   const db = await getDatabaseSlate();

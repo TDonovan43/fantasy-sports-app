@@ -13,6 +13,7 @@ import {
   lineupToDraftKingsCsv,
   optimizeLineup,
 } from "@/lib/optimizer";
+import type { StarterControls } from "@/lib/starters";
 import type { PoolPlayer, SlateData } from "@/lib/types";
 
 type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value";
@@ -20,6 +21,21 @@ type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
 const PAGE_SIZE = 50;
+
+export function StartButton({ marked, pending, onClick }: { marked: boolean; pending: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={pending}
+      title={marked ? "Remove the manual starter override" : "Treat this player as the starter and recalculate projections"}
+      className={`whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold disabled:opacity-50 ${
+        marked ? "border-sky-400 bg-sky-400 text-slate-950" : "border-slate-600 text-slate-300 hover:border-sky-400 hover:text-sky-300"
+      }`}
+    >
+      {marked ? "Starting ✓" : "Mark starting"}
+    </button>
+  );
+}
 
 function downloadCsv(filename: string, csv: string) {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -30,7 +46,15 @@ function downloadCsv(filename: string, csv: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function LineupTab({ slate }: { slate: SlateData }) {
+export default function LineupTab({
+  slate,
+  showUnprojected,
+  starterControls,
+}: {
+  slate: SlateData;
+  showUnprojected: boolean;
+  starterControls: StarterControls;
+}) {
   const [position, setPosition] = useState<PositionFilter>("ALL");
   const [gameFilter, setGameFilter] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -40,7 +64,15 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
-  const byId = useMemo(() => new Map(slate.players.map((p) => [p.id, p])), [slate.players]);
+  /** Projected players plus (optionally) unprojected ones, which can only be added by hand. */
+  const pool = useMemo(
+    () => (showUnprojected ? [...slate.players, ...(slate.unprojected ?? [])] : slate.players),
+    [slate.players, slate.unprojected, showUnprojected],
+  );
+  const byId = useMemo(
+    () => new Map([...slate.players, ...(slate.unprojected ?? [])].map((p) => [p.id, p])),
+    [slate.players, slate.unprojected],
+  );
   const lineup = useMemo(() => lineupIds.map((id) => byId.get(id)).filter((p): p is PoolPlayer => !!p), [lineupIds, byId]);
   const slots = assignSlots(lineup) ?? ROSTER_SLOTS.map(() => null);
   const salaryUsed = lineupSalary(lineup);
@@ -52,7 +84,7 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const rows = slate.players.filter((p) => {
+    const rows = pool.filter((p) => {
       if (position === "FLEX" ? !["RB", "WR", "TE"].includes(p.position) : position !== "ALL" && p.position !== position) return false;
       if (selectedGame && p.team !== selectedGame.awayTeam && p.team !== selectedGame.homeTeam) return false;
       if (q && !p.name.toLowerCase().includes(q) && !p.team.toLowerCase().includes(q)) return false;
@@ -60,7 +92,7 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
     });
     const dir = sort.desc ? -1 : 1;
     return rows.sort((a, b) => (sort.key === "name" ? a.name.localeCompare(b.name) : a[sort.key] - b[sort.key]) * dir);
-  }, [slate.players, position, selectedGame, query, sort]);
+  }, [pool, position, selectedGame, query, sort]);
 
   function resetPaging<T>(fn: (v: T) => void) {
     return (v: T) => {
@@ -100,7 +132,8 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
   }
 
   function runOptimizer() {
-    const result = optimizeLineup({ pool: slate.players, salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
+    // Unprojected players are only used if you've added them yourself (they're locked in).
+    const result = optimizeLineup({ pool: [...slate.players, ...(slate.unprojected ?? [])], salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
     if (!result.ok) {
       setMessage(result.reason);
       return;
@@ -240,12 +273,18 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
                           {p.injury && (
                             <span className={`ml-1 font-semibold ${isInactive(p.injury) ? "text-rose-400" : "text-amber-300"}`}>{p.injury}</span>
                           )}
+                          {p.research?.limitedData && (
+                            <span title="Starter with little recent data: projected from past games plus the role baseline" className="ml-1 text-sky-300">
+                              limited data
+                            </span>
+                          )}
+                          {p.projected === 0 && <span className="ml-1 text-slate-400">no projection</span>}
                         </p>
                       </td>
                       <td className="px-3 py-2 text-slate-400">{p.opponent ? `vs ${p.opponent}` : "—"}</td>
                       <td className="px-3 py-2">{money(p.salary)}</td>
                       <td className="px-3 py-2 font-bold text-emerald-300">
-                        {p.projected.toFixed(1)}
+                        {p.projected === 0 ? "—" : p.projected.toFixed(1)}
                         {p.projectionFromDkAvg && (
                           <span title="No projection available; DraftKings season average" className="ml-1 text-[10px] font-normal text-slate-500">
                             avg
@@ -256,9 +295,14 @@ export default function LineupTab({ slate }: { slate: SlateData }) {
                       <td className="px-3 py-2 text-slate-400">{p.ceiling.toFixed(1)}</td>
                       <td className="px-3 py-2 text-amber-300">{p.value > 0 ? `${p.value.toFixed(2)}x` : "—"}</td>
                       <td className="px-3 py-2">
-                        <button onClick={() => toggleExclude(p.id)} className="text-xs text-slate-500 hover:text-rose-400">
-                          {excluded ? "Undo" : "Exclude"}
-                        </button>
+                        <div className="flex items-center gap-3">
+                          {starterControls.canMark(p) && (
+                            <StartButton marked={starterControls.isMarked(p)} pending={starterControls.pending} onClick={() => starterControls.toggle(p)} />
+                          )}
+                          <button onClick={() => toggleExclude(p.id)} className="text-xs text-slate-500 hover:text-rose-400">
+                            {excluded ? "Undo" : "Exclude"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );

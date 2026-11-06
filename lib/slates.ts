@@ -38,5 +38,10 @@ export function filterSlate(slate: SlateData, filter: SlateFilter): SlateData {
   if (filter === "all") return slate;
   const games = slate.games.filter((g) => gameInSlate(g, filter));
   const teams = new Set(games.flatMap((g) => [g.awayTeam, g.homeTeam]));
-  return { ...slate, games, players: slate.players.filter((p) => teams.has(p.team)) };
+  return {
+    ...slate,
+    games,
+    players: slate.players.filter((p) => teams.has(p.team)),
+    unprojected: slate.unprojected?.filter((p) => teams.has(p.team)),
+  };
 }

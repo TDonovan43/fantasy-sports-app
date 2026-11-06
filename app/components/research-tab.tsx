@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { StartButton } from "@/app/components/lineup-tab";
 import { money, ordinal, pct } from "@/lib/format";
+import type { StarterControls } from "@/lib/starters";
 import type { OffensePosition, PlayerResearch, PoolPlayer, SlateData, TeamProfile } from "@/lib/types";
 
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "DST";
@@ -82,7 +84,29 @@ function rankTone(rank: number, count: number, goodIsHigh: boolean) {
 
 type Hover = { player: PoolPlayer; x: number; y: number };
 
-export default function ResearchTab({ slate }: { slate: SlateData }) {
+/** Stand-in research for unprojected players so the table can render them. */
+const EMPTY_RESEARCH: PlayerResearch = {
+  games: 0,
+  seasonAvg: 0,
+  last3Avg: 0,
+  weightedAvg: 0,
+  salaryPrior: null,
+  baseProjection: 0,
+  matchupFactor: 1,
+  vegasFactor: null,
+  impliedTotal: null,
+  roleFactor: 1,
+};
+
+export default function ResearchTab({
+  slate,
+  showUnprojected,
+  starterControls,
+}: {
+  slate: SlateData;
+  showUnprojected: boolean;
+  starterControls: StarterControls;
+}) {
   const [position, setPosition] = useState<PositionFilter>("ALL");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<{ key: string; desc: boolean }>({ key: "projected", desc: true });
@@ -96,20 +120,21 @@ export default function ResearchTab({ slate }: { slate: SlateData }) {
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const col = columns.find((c) => c.key === sort.key);
-    const list = slate.players.filter(
+    const source = showUnprojected ? [...slate.players, ...(slate.unprojected ?? [])] : slate.players;
+    const list = source.filter(
       (p) =>
-        p.research &&
+        (p.research || p.projected === 0) &&
         (position === "ALL" || p.position === position) &&
         (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase().includes(q)),
     );
     const dir = sort.desc ? -1 : 1;
     return list.sort((a, b) => {
       if (sort.key === "name") return a.name.localeCompare(b.name) * dir;
-      const va = col?.value(a, a.research!) ?? -Infinity;
-      const vb = col?.value(b, b.research!) ?? -Infinity;
+      const va = col?.value(a, a.research ?? EMPTY_RESEARCH) ?? -Infinity;
+      const vb = col?.value(b, b.research ?? EMPTY_RESEARCH) ?? -Infinity;
       return (va - vb) * dir;
     });
-  }, [slate.players, position, query, sort, columns]);
+  }, [slate.players, slate.unprojected, showUnprojected, position, query, sort, columns]);
 
   if (!slate.players.some((p) => p.research)) {
     return (
@@ -189,7 +214,8 @@ export default function ResearchTab({ slate }: { slate: SlateData }) {
           </thead>
           <tbody>
             {rows.slice(0, visible).map((p) => {
-              const r = p.research!;
+              const r = p.research ?? EMPTY_RESEARCH;
+              const unprojected = !p.research;
               return (
                 <tr key={p.id} className="border-t border-slate-800 hover:bg-slate-800/50">
                   <td className="px-3 py-2">
@@ -206,17 +232,37 @@ export default function ResearchTab({ slate }: { slate: SlateData }) {
                         {p.position} · {p.team}
                         {p.injury && <span className="ml-1 font-semibold text-amber-300">{p.injury}</span>}
                         {r.roleFactor < 1 && <span className="ml-1 text-slate-400">backup</span>}
+                        {unprojected && <span className="ml-1 text-slate-400">no projection</span>}
                       </span>
                     </button>
+                    {r.limitedData && (
+                      <p
+                        className="mt-1 max-w-[260px] whitespace-normal text-[11px] text-sky-300"
+                        title="Projection = past real games blended with the role baseline, then the matchup and Vegas adjustments"
+                      >
+                        Limited data ({r.limitedData.source === "manual" ? "marked starting" : "Sleeper depth chart"}):{" "}
+                        {r.limitedData.historyGames
+                          ? `${r.limitedData.historyGames} real game${r.limitedData.historyGames > 1 ? "s" : ""} avg ${r.limitedData.historyAvg}`
+                          : "no past games"}
+                        , role {r.limitedData.roleBaseline}
+                      </p>
+                    )}
+                    {r.manualStarter && !r.limitedData && <p className="mt-1 text-[11px] text-sky-300">Marked starting</p>}
+                    {starterControls.canMark(p) && (
+                      <div className="mt-1">
+                        <StartButton marked={starterControls.isMarked(p)} pending={starterControls.pending} onClick={() => starterControls.toggle(p)} />
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-slate-400">{p.opponent ?? "—"}</td>
                   {columns.map((c) => {
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";
                     const tone = isFactor && typeof v === "number" ? (v > 1.02 ? "text-emerald-300" : v < 0.98 ? "text-rose-300" : "text-slate-400") : "";
+                    const blank = unprojected && c.key !== "salary";
                     return (
                       <td key={c.key} className={`px-3 py-2 ${c.key === "projected" ? "font-bold text-emerald-300" : tone || "text-slate-300"}`}>
-                        {v === null || v === undefined ? "—" : c.format ? c.format(v) : v}
+                        {blank || v === null || v === undefined ? "—" : c.format ? c.format(v) : v}
                       </td>
                     );
                   })}
