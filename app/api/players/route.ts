@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { getPlayerData } from "@/lib/player-data";
+import { getSlateData } from "@/lib/player-data";
 
+/** Current DraftKings player pool from the best available source. */
 export async function GET() {
-  const players = await getPlayerData();
-  return NextResponse.json({ players });
+  const { season, week, source, salaryCap, players, notices } = await getSlateData();
+  return NextResponse.json({ season, week, source, salaryCap, notices, players });
 }

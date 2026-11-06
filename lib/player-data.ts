@@ -1,293 +1,448 @@
+import {
+  NOTICE_NO_DST,
+  NOTICE_TRIAL,
+  applyDkSalariesToSlate,
+  buildSalaryLookup,
+  buildStatusLookup,
+  hideOutAndIr,
+  type DkSalaryRow,
+} from "@/lib/dk-salaries";
+import { loadSleeperDepth } from "@/lib/sleeper";
+import { getGameWeather } from "@/lib/weather";
+import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
+import {
+  estimateRange,
+  getSeasonWeek,
+  getSportsDataIOKey,
+  getWeekGames,
+  getWeekProjections,
+  round1,
+  round2,
+  toPosition,
+} from "@/lib/sportsdataio";
+import type { Matchup, OffensePosition, PoolPlayer, Position, SlateData, StarterOverride } from "@/lib/types";
 
-export type NflPlayerRow = {
-  name: string;
-  position: string;
-  team: string;
-  salary: string;
-  projected: number;
-  floor: number;
-  ceiling: number;
-  value: number;
-  trend: "up" | "flat";
+export type SlateOptions = {
+  /** Players the user marked as starting (manual overrides). */
+  starters?: StarterOverride[];
 };
 
-export const fallbackPlayers: NflPlayerRow[] = [
-  { name: "Jalen Hurts", position: "QB", team: "PHI", salary: "$8,600", projected: 24.8, floor: 17.4, ceiling: 31.2, value: 2.88, trend: "up" },
-  { name: "Christian McCaffrey", position: "RB", team: "SF", salary: "$9,300", projected: 22.6, floor: 15.7, ceiling: 29.3, value: 2.43, trend: "up" },
-  { name: "Amon-Ra St. Brown", position: "WR", team: "DET", salary: "$8,200", projected: 18.4, floor: 13.2, ceiling: 23.7, value: 2.24, trend: "flat" },
-  { name: "Sam LaPorta", position: "TE", team: "DET", salary: "$6,100", projected: 14.9, floor: 10.6, ceiling: 19.8, value: 2.44, trend: "up" },
-  { name: "Puka Nacua", position: "WR", team: "LAR", salary: "$7,600", projected: 17.1, floor: 11.4, ceiling: 21.9, value: 2.25, trend: "up" },
-  { name: "Breece Hall", position: "RB", team: "NYJ", salary: "$7,000", projected: 15.8, floor: 10.9, ceiling: 20.4, value: 2.26, trend: "flat" },
-  { name: "George Kittle", position: "TE", team: "SF", salary: "$5,800", projected: 12.7, floor: 8.9, ceiling: 16.4, value: 2.19, trend: "up" },
-  { name: "C.J. Stroud", position: "QB", team: "HOU", salary: "$6,800", projected: 19.9, floor: 14.1, ceiling: 26.4, value: 2.93, trend: "up" },
-];
+const OVERRIDE_POSITIONS = new Set<OffensePosition>(["QB", "RB", "WR", "TE"]);
 
-function normalizePlayerRow(raw: Record<string, any>, index: number): NflPlayerRow | null {
-  const name = String(
-    raw.name ?? raw.player_name ?? raw.display_name ?? raw.playerName ?? `Player ${index + 1}`,
-  );
-
-  if (!name || name === "undefined") {
-    return null;
+/** Parses the `starters` query param: JSON array of {name, team, position}. Invalid entries are dropped. */
+export function parseStarterOverrides(raw: string | null): StarterOverride[] {
+  if (!raw) return [];
+  try {
+    const list: unknown = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list
+      .slice(0, 25)
+      .filter(
+        (o): o is StarterOverride =>
+          !!o &&
+          typeof o.name === "string" &&
+          typeof o.team === "string" &&
+          OVERRIDE_POSITIONS.has(o.position) &&
+          o.name.length <= 60 &&
+          o.team.length <= 4,
+      )
+      .map((o) => ({ name: o.name, team: o.team.toUpperCase(), position: o.position }));
+  } catch {
+    return [];
   }
+}
 
-  const position = String(raw.position ?? raw.pos ?? "").toUpperCase();
-  const team = String(raw.team ?? raw.team_abbr ?? raw.teamAbbr ?? raw.franchise ?? "N/A");
-  const salary = Number(raw.salary ?? raw.dk_salary ?? raw.draftkings_salary ?? raw.salary_usd ?? raw.salaryUSD ?? 0);
-  const projected = Number(raw.projected ?? raw.projected_points ?? raw.projectedFantasyPoints ?? raw.fantasy_points ?? raw.fppg ?? 0);
-  const floor = Number(raw.floor ?? raw.low ?? raw.min_projection ?? 0);
-  const ceiling = Number(raw.ceiling ?? raw.high ?? raw.max_projection ?? 0);
-  const value = Number(raw.value ?? (salary > 0 && projected ? projected / (salary / 1000) : 0));
+export const DK_CLASSIC_CAP = 50000;
+export const SLATE_GAME_TYPE = "DraftKings Classic";
 
+type Json = Record<string, unknown>;
+
+function samplePlayer(
+  name: string,
+  position: Position,
+  team: string,
+  opponent: string,
+  salary: number,
+  projected: number,
+): PoolPlayer {
   return {
+    id: `sample-${team}-${position}-${name.replace(/\W+/g, "")}`,
     name,
-    position: position || "N/A",
+    position,
     team,
-    salary: salary > 0 ? `$${salary.toLocaleString()}` : "N/A",
-    projected: Number.isFinite(projected) ? projected : 0,
-    floor: Number.isFinite(floor) ? floor : 0,
-    ceiling: Number.isFinite(ceiling) ? ceiling : 0,
-    value: Number.isFinite(value) ? Number(value.toFixed(2)) : 0,
-    trend: index % 2 === 0 ? "up" : "flat",
+    opponent,
+    gameKey: null,
+    salary,
+    projected,
+    ...estimateRange(position, projected),
+    rangeEstimated: true,
+    value: round2(projected / (salary / 1000)),
+    injury: null,
   };
 }
 
-export async function getSportsDataIOSeasonWeek(): Promise<{ season: string; week: string }> {
-  const envSeason = process.env.SPORTS_DATA_IO_SEASON;
-  const envWeek = process.env.SPORTS_DATA_IO_WEEK;
-  const apiKey = process.env.SPORTS_DATA_IO_API_KEY ?? process.env.SPORTS_DATA_IO_KEY;
+/** Illustrative pool used only when no live source or database is reachable. */
+export const samplePlayers: PoolPlayer[] = [
+  samplePlayer("Jalen Hurts", "QB", "PHI", "DAL", 8600, 24.8),
+  samplePlayer("C.J. Stroud", "QB", "HOU", "IND", 6800, 19.9),
+  samplePlayer("Jared Goff", "QB", "DET", "GB", 6400, 18.6),
+  samplePlayer("Christian McCaffrey", "RB", "SF", "MIN", 9300, 22.6),
+  samplePlayer("Breece Hall", "RB", "NYJ", "NE", 7000, 15.8),
+  samplePlayer("Jahmyr Gibbs", "RB", "DET", "GB", 7800, 18.2),
+  samplePlayer("Tony Pollard", "RB", "TEN", "JAX", 5600, 11.9),
+  samplePlayer("Jaylen Warren", "RB", "PIT", "CLE", 4900, 10.1),
+  samplePlayer("Amon-Ra St. Brown", "WR", "DET", "GB", 8200, 18.4),
+  samplePlayer("Puka Nacua", "WR", "LAR", "SEA", 7600, 17.1),
+  samplePlayer("CeeDee Lamb", "WR", "DAL", "PHI", 8400, 18.9),
+  samplePlayer("Nico Collins", "WR", "HOU", "IND", 6900, 15.2),
+  samplePlayer("Jordan Addison", "WR", "MIN", "SF", 5700, 12.6),
+  samplePlayer("Jayden Reed", "WR", "GB", "DET", 5200, 11.8),
+  samplePlayer("Khalil Shakir", "WR", "BUF", "MIA", 4600, 10.2),
+  samplePlayer("Sam LaPorta", "TE", "DET", "GB", 6100, 14.9),
+  samplePlayer("George Kittle", "TE", "SF", "MIN", 5800, 12.7),
+  samplePlayer("Dalton Kincaid", "TE", "BUF", "MIA", 4400, 9.6),
+  samplePlayer("49ers", "DST", "SF", "MIN", 3600, 8.4),
+  samplePlayer("Eagles", "DST", "PHI", "DAL", 3200, 7.6),
+  samplePlayer("Steelers", "DST", "PIT", "CLE", 2800, 7.1),
+];
 
-  if (envSeason && envWeek) {
-    return { season: envSeason, week: envWeek };
+const sampleGames: Matchup[] = [
+  { id: "sample-1", awayTeam: "DET", homeTeam: "GB", kickoff: null, pointSpread: null, overUnder: null, channel: null, status: "Sample" },
+  { id: "sample-2", awayTeam: "PHI", homeTeam: "DAL", kickoff: null, pointSpread: null, overUnder: null, channel: null, status: "Sample" },
+  { id: "sample-3", awayTeam: "SF", homeTeam: "MIN", kickoff: null, pointSpread: null, overUnder: null, channel: null, status: "Sample" },
+];
+
+const SALARY_KEYS = [
+  "DraftKingsSalary",
+  "draftkings_salary",
+  "DKSalary",
+  "dk_salary",
+  "DfsSalary",
+  "DFSSalary",
+  "Salary",
+  "salary",
+  "salary_usd",
+  "salaryUSD",
+  "current_salary",
+];
+
+function firstNumber(raw: Json, keys: string[]): number {
+  for (const key of keys) {
+    const n = Number(raw[key]);
+    if (Number.isFinite(n) && n > 0) return n;
   }
-
-  if (!apiKey) {
-    return {
-      season: envSeason ?? "2025",
-      week: envWeek ?? "1",
-    };
-  }
-
-  try {
-    const [seasonRes, weekRes] = await Promise.all([
-      fetch("https://api.sportsdata.io/v3/nfl/scores/json/CurrentSeason", {
-        cache: "no-store",
-        headers: { "Ocp-Apim-Subscription-Key": apiKey },
-      }),
-      fetch("https://api.sportsdata.io/v3/nfl/scores/json/CurrentWeek", {
-        cache: "no-store",
-        headers: { "Ocp-Apim-Subscription-Key": apiKey },
-      }),
-    ]);
-
-    const season = seasonRes.ok ? Number(await seasonRes.text()) : Number(envSeason ?? 2025);
-    const week = weekRes.ok ? Number(await weekRes.text()) : Number(envWeek ?? 1);
-
-    return {
-      season: String(Number.isFinite(season) ? season : envSeason ?? 2025),
-      week: String(Number.isFinite(week) ? week : envWeek ?? 1),
-    };
-  } catch {
-    return {
-      season: envSeason ?? "2025",
-      week: envWeek ?? "1",
-    };
-  }
+  return 0;
 }
 
-async function fetchSportsDataIORows(): Promise<NflPlayerRow[]> {
-  const apiKey = process.env.SPORTS_DATA_IO_API_KEY ?? process.env.SPORTS_DATA_IO_KEY;
-  if (!apiKey) {
-    return [];
+function firstString(raw: Json, keys: string[]): string | null {
+  for (const key of keys) {
+    const v = raw[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
   }
-
-  const { season, week } = await getSportsDataIOSeasonWeek();
-
-  try {
-    const response = await fetch(
-      `https://api.sportsdata.io/v3/nfl/projections/json/PlayerGameProjectionStatsByWeek/${season}/${week}`,
-      {
-        cache: "no-store",
-        headers: {
-          "Ocp-Apim-Subscription-Key": apiKey,
-        },
-      },
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const payload = (await response.json()) as Array<Record<string, any>>;
-    const rows = payload
-      .map((item, index) => {
-        const name = String(item.Name ?? item.name ?? item.PlayerName ?? item.playerName ?? item.Player ?? `Player ${index + 1}`);
-        const position = String(item.Position ?? item.position ?? item.Pos ?? item.pos ?? "").toUpperCase();
-        const team = String(item.Team ?? item.team ?? item.TeamAbbreviation ?? item.teamAbbr ?? item.franchise ?? "N/A");
-        const salary = Number(item.DfsSalary ?? item.DFSSalary ?? item.Salary ?? item.salary ?? item.DraftKingsSalary ?? item.draftkings_salary ?? 0);
-        const projected = Number(item.FantasyPoints ?? item.fantasyPoints ?? item.ProjectedFantasyPoints ?? item.projectedFantasyPoints ?? item.ProjectedPoints ?? item.projected_points ?? 0);
-        const floor = Number(item.Floor ?? item.floor ?? item.ProjectedFloor ?? item.projectedFloor ?? 0);
-        const ceiling = Number(item.Ceiling ?? item.ceiling ?? item.ProjectedCeiling ?? item.projectedCeiling ?? 0);
-
-        if (!name || name === "undefined") {
-          return null;
-        }
-
-        const value = salary > 0 && projected ? projected / (salary / 1000) : 0;
-
-        return {
-          name,
-          position: position || "N/A",
-          team,
-          salary: salary > 0 ? `$${salary.toLocaleString()}` : "N/A",
-          projected: Number.isFinite(projected) ? projected : 0,
-          floor: Number.isFinite(floor) ? floor : 0,
-          ceiling: Number.isFinite(ceiling) ? ceiling : 0,
-          value: Number.isFinite(value) ? Number(value.toFixed(2)) : 0,
-          trend: index % 2 === 0 ? "up" : "flat",
-        } satisfies NflPlayerRow;
-      })
-      .filter((item): item is NflPlayerRow => item !== null)
-      .slice(0, 8);
-
-    return rows.length > 0 ? rows : [];
-  } catch {
-    return [];
-  }
+  return null;
 }
 
-async function fetchProviderRows(): Promise<NflPlayerRow[]> {
-  const sportsDataRows = await fetchSportsDataIORows();
-  if (sportsDataRows.length > 0) {
-    return sportsDataRows;
-  }
+/** Normalizes a row from an arbitrary licensed DFS JSON feed. */
+export function normalizeFeedRow(raw: Json, index: number): PoolPlayer | null {
+  const name = firstString(raw, ["name", "Name", "player_name", "display_name", "playerName"]);
+  const position = toPosition(raw.position ?? raw.Position ?? raw.pos);
+  if (!name || !position) return null;
 
+  const team = firstString(raw, ["team", "Team", "team_abbr", "teamAbbr", "franchise"]) ?? "FA";
+  const salary = firstNumber(raw, SALARY_KEYS);
+  const projected = round1(
+    firstNumber(raw, ["projected", "FantasyPointsDraftKings", "projected_points", "projectedFantasyPoints", "fantasy_points", "fppg"]),
+  );
+  const suppliedFloor = firstNumber(raw, ["floor", "Floor", "low", "min_projection"]);
+  const suppliedCeiling = firstNumber(raw, ["ceiling", "Ceiling", "high", "max_projection"]);
+  const estimated = estimateRange(position, projected);
+
+  return {
+    id: String(raw.id ?? raw.PlayerID ?? `feed-${index}-${name}`),
+    name,
+    position,
+    team,
+    opponent: firstString(raw, ["opponent", "Opponent", "opp"]),
+    gameKey: firstString(raw, ["gameKey", "GameKey", "game_id"]),
+    salary,
+    projected,
+    floor: suppliedFloor || estimated.floor,
+    ceiling: suppliedCeiling || estimated.ceiling,
+    rangeEstimated: !(suppliedFloor && suppliedCeiling),
+    value: salary > 0 ? round2(projected / (salary / 1000)) : 0,
+    injury: firstString(raw, ["injury", "InjuryStatus", "status"]),
+  };
+}
+
+async function fetchFeedPlayers(): Promise<PoolPlayer[]> {
   const feedUrl = process.env.DFS_FEED_URL ?? process.env.DFS_DATA_FEED_URL ?? process.env.DRAFTKINGS_FEED_URL;
-  if (!feedUrl) {
-    return [];
-  }
+  if (!feedUrl) return [];
 
   try {
     const response = await fetch(feedUrl, { cache: "no-store" });
-    if (!response.ok) {
-      return [];
-    }
+    if (!response.ok) return [];
+    const json: unknown = await response.json();
+    const container = json as { players?: unknown; data?: unknown };
+    const payload = Array.isArray(json)
+      ? json
+      : Array.isArray(container?.players)
+        ? container.players
+        : Array.isArray(container?.data)
+          ? container.data
+          : [];
 
-    const json = await response.json();
-    const payload = Array.isArray(json) ? json : Array.isArray(json?.players) ? json.players : Array.isArray(json?.data) ? json.data : [];
-
-    const rows = (payload as Array<Record<string, any>>)
-      .map((item: Record<string, any>, index: number) => normalizePlayerRow(item, index))
-      .filter((item): item is NflPlayerRow => item !== null);
-
-    return rows.slice(0, 8);
+    return (payload as Json[])
+      .map((row, i) => normalizeFeedRow(row, i))
+      .filter((p): p is PoolPlayer => p !== null && p.projected > 0);
   } catch {
     return [];
   }
 }
 
-export async function getDatabaseResearchPlayers(): Promise<NflPlayerRow[]> {
-  if (!process.env.DATABASE_URL) {
-    return [];
-  }
+/** Reads the most recently synced DraftKings slate from Postgres. */
+export async function getDatabaseSlate(): Promise<SlateData | null> {
+  if (!process.env.DATABASE_URL) return null;
 
   try {
-    const players = await prisma.player.findMany({
-      take: 8,
+    const slate = await prisma.slate.findFirst({
+      where: { gameType: SLATE_GAME_TYPE },
+      orderBy: [{ season: "desc" }, { week: "desc" }, { updatedAt: "desc" }],
       include: {
-        salaries: { orderBy: { collectedAt: "desc" }, take: 1 },
-        projections: { orderBy: { collectedAt: "desc" }, take: 1 },
+        games: { orderBy: { kickoff: "asc" } },
+        projections: { include: { player: true } },
+        salaries: true,
       },
     });
+    if (!slate || slate.projections.length === 0) return null;
 
-    return players.map((player: (typeof players)[number]) => {
-      const salary = player.salaries[0]?.salary ?? 0;
-      const projection = player.projections[0]?.projectedFantasyPoints ?? 0;
-      const value = salary > 0 ? projection / (salary / 1000) : 0;
+    const salaryByPlayer = new Map(slate.salaries.map((s) => [s.playerId, s.salary]));
+    const players: PoolPlayer[] = [];
+    for (const proj of slate.projections) {
+      const position = toPosition(proj.player.position);
+      if (!position) continue;
+      const salary = salaryByPlayer.get(proj.playerId) ?? 0;
+      const projected = proj.projectedFantasyPoints;
+      const estimated = estimateRange(position, projected);
+      players.push({
+        id: proj.player.externalId ?? proj.player.id,
+        name: proj.player.name,
+        position,
+        team: proj.player.team ?? "FA",
+        opponent: proj.opponent,
+        gameKey: proj.gameKey,
+        salary,
+        projected,
+        floor: proj.floor ?? estimated.floor,
+        ceiling: proj.ceiling ?? estimated.ceiling,
+        rangeEstimated: proj.floor === null || proj.ceiling === null,
+        value: salary > 0 ? round2(projected / (salary / 1000)) : 0,
+        injury: proj.player.status,
+      });
+    }
 
-      return {
-        name: player.name,
-        position: player.position,
-        team: player.team ?? "N/A",
-        salary: salary > 0 ? `$${salary.toLocaleString()}` : "N/A",
-        projected: projection || 0,
-        floor: player.projections[0]?.floor ?? 0,
-        ceiling: player.projections[0]?.ceiling ?? 0,
-        value: Number(value.toFixed(2)),
-        trend: "up",
-      };
-    });
-  } catch {
-    return [];
+    return {
+      season: slate.season,
+      week: slate.week,
+      source: "Database",
+      salaryCap: slate.salaryCap,
+      players,
+      games: slate.games.map((g) => ({
+        id: g.id,
+        awayTeam: g.awayTeam,
+        homeTeam: g.homeTeam,
+        kickoff: g.kickoff?.toISOString() ?? null,
+        pointSpread: g.pointSpread,
+        overUnder: g.overUnder,
+        channel: g.channel,
+        status: g.status,
+      })),
+      notices: [`Showing the last database sync (${slate.updatedAt.toLocaleString("en-US")}).`],
+      dkSalaries: null,
+    };
+  } catch (error) {
+    console.error("Database slate read failed", error);
+    return null;
   }
 }
 
-export async function getResearchPlayers(): Promise<NflPlayerRow[]> {
-  const dbPlayers = await getDatabaseResearchPlayers();
-  if (dbPlayers.length > 0) {
-    return dbPlayers;
+/** Live SportsDataIO slate, or null when no key is configured / the request fails. */
+export async function getSportsDataIOSlate(): Promise<SlateData | null> {
+  if (!getSportsDataIOKey()) return null;
+
+  const { season, week } = await getSeasonWeek();
+  const [projections, games] = await Promise.all([getWeekProjections(season, week), getWeekGames(season, week)]);
+  if (!projections || projections.players.length === 0) return null;
+
+  const notices: string[] = [];
+  if (projections.scrambled) {
+    notices.push(NOTICE_TRIAL);
   }
+  if (!projections.players.some((p) => p.position === "DST")) {
+    notices.push(NOTICE_NO_DST);
+  }
+  notices.push("Floor and ceiling are estimated from projection and positional volatility.");
 
-  return getPlayerData();
-}
-
-export async function getLiveWeekContext() {
-  const { season, week } = await getSportsDataIOSeasonWeek();
   return {
     season,
     week,
     source: "SportsDataIO",
-    label: `Week ${week} • ${season}`,
+    salaryCap: DK_CLASSIC_CAP,
+    players: projections.players,
+    games,
+    notices,
+    dkSalaries: null,
   };
 }
 
-export async function getPlayerData(): Promise<NflPlayerRow[]> {
-  const providerRows = await fetchProviderRows();
-  if (providerRows.length > 0) {
-    return providerRows;
-  }
-
+/** DraftKings salary rows uploaded for a given week, newest upload only. */
+export async function getStoredDkSalaries(season: number, week: number): Promise<{ rows: DkSalaryRow[]; uploadedAt: string } | null> {
+  if (!process.env.DATABASE_URL) return null;
   try {
-    const response = await fetch("https://api.nflverse.com/api/v1/player?season=2024", {
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return fallbackPlayers;
-    }
-
-    const json = await response.json();
-    const rawPlayers = Array.isArray(json?.data) ? json.data : [];
-
-    const mapped = rawPlayers
-      .filter((player: any) => {
-        const position = String(player.position ?? "").toUpperCase();
-        return ["QB", "RB", "WR", "TE"].includes(position);
-      })
-      .slice(0, 8)
-      .map((player: any, index: number) => {
-        const name = String(player.display_name ?? player.name ?? player.gsis_name ?? `Player ${index + 1}`);
-        const position = String(player.position ?? "").toUpperCase();
-        const team = String(player.team ?? player.team_abbr ?? player.franchise ?? "N/A");
-        const projected = Number(player.fantasy_points ?? player.ppr_fantasy_points ?? 0);
-        const salaryRaw = Number(player.draftkings_salary ?? player.salary ?? 0);
-
-        return {
-          name,
-          position,
-          team,
-          salary: salaryRaw > 0 ? `$${salaryRaw.toLocaleString()}` : "N/A",
-          projected: Number.isFinite(projected) ? projected : 0,
-          floor: Number(player.floor ?? player.low ?? 0),
-          ceiling: Number(player.ceiling ?? player.high ?? 0),
-          value: Number(player.value ?? (projected && salaryRaw ? projected / (salaryRaw / 1000) : 0)),
-          trend: index % 2 === 0 ? "up" : "flat",
-        };
-      });
-
-    return mapped.length > 0 ? mapped : fallbackPlayers;
-  } catch {
-    return fallbackPlayers;
+    const rows = await prisma.dkSalary.findMany({ where: { season, week } });
+    if (rows.length === 0) return null;
+    const uploadedAt = rows.reduce((max, r) => (r.uploadedAt > max ? r.uploadedAt : max), rows[0].uploadedAt);
+    return {
+      uploadedAt: uploadedAt.toISOString(),
+      rows: rows.map((r) => ({
+        dkId: r.dkId,
+        name: r.name,
+        position: toPosition(r.position) ?? "WR",
+        rosterPosition: r.rosterPosition,
+        salary: r.salary,
+        team: r.team,
+        opponent: r.opponent,
+        kickoff: r.kickoff,
+        gameInfo: r.gameInfo,
+        avgPoints: r.avgPoints,
+        status: r.status,
+      })),
+    };
+  } catch (error) {
+    console.error("DK salary read failed", error);
+    return null;
   }
+}
+
+/** Overlays the week's uploaded DraftKings salaries, if any, onto a slate. */
+export async function withStoredDkSalaries(slate: SlateData): Promise<SlateData> {
+  const stored = await getStoredDkSalaries(slate.season, slate.week);
+  return stored ? applyDkSalariesToSlate(slate, stored.rows, stored.uploadedAt) : slate;
+}
+
+export async function getSlateData(options: SlateOptions = {}): Promise<SlateData> {
+  return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate(options)));
+}
+
+/**
+ * Season/week to project: pinned by env, else SportsDataIO's current week, else the first
+ * week in the nflverse schedule with unplayed games.
+ */
+export async function resolveSeasonWeek(): Promise<{ season: number; week: number }> {
+  if ((process.env.SPORTS_DATA_IO_SEASON && process.env.SPORTS_DATA_IO_WEEK) || getSportsDataIOKey()) {
+    return getSeasonWeek();
+  }
+  const fromSchedule = currentWeekFromSchedule(await loadNflverseData(new Date().getFullYear()));
+  return fromSchedule ?? getSeasonWeek();
+}
+
+/** Live slate projected by the FieldGoal model on nflverse data, or null if the data is unavailable. */
+export async function getNflverseSlate(options: SlateOptions = {}): Promise<SlateData | null> {
+  try {
+    const { season, week } = await resolveSeasonWeek();
+    const [data, depth] = await Promise.all([loadNflverseData(season), loadSleeperDepth()]);
+    if (!data.stats.get(season)?.length || data.schedule.length === 0) return null;
+
+    const stored = await getStoredDkSalaries(season, week);
+    const result = projectWeek(data, season, week, {
+      salaryOf: stored ? buildSalaryLookup(stored.rows) : undefined,
+      statusOf: stored ? buildStatusLookup(stored.rows) : undefined,
+      model: DEFAULT_MODEL,
+      depth,
+      starters: options.starters,
+    });
+    if (result.players.length === 0) return null;
+
+    const notices = [
+      `Projections: FieldGoal model on nflverse stats through week ${result.throughWeek}. It uses recency-weighted DraftKings points, opponent and Vegas adjustments${stored ? ", and a salary prior for small samples" : ""}.`,
+      result.hasLines
+        ? "Spreads and totals come from the nflverse schedule."
+        : "No betting lines are posted for this week yet, so projections use only the opponent adjustment.",
+      depth
+        ? "Starting QBs and injury status come from Sleeper's depth charts. Starters without enough recent games are projected from past games plus the team's role baseline (tagged \"limited data\")."
+        : "Sleeper depth charts are unavailable right now, so starting QBs are taken from each team's last game.",
+    ];
+    const weather = await getGameWeather(result.venues);
+    const games = result.games.map((g) => {
+      const wx = weather.get(g.id);
+      return { ...g, roof: wx?.roof ?? g.roof ?? null, weather: wx?.weather ?? null };
+    });
+    return {
+      season,
+      week,
+      source: "nflverse model",
+      salaryCap: DK_CLASSIC_CAP,
+      players: result.players,
+      games,
+      teams: result.teams,
+      notices,
+      dkSalaries: null,
+    };
+  } catch (error) {
+    console.error("nflverse projection failed", error);
+    return null;
+  }
+}
+
+type ProjectionPreference = "auto" | "nflverse" | "sportsdataio";
+
+function projectionPreference(): ProjectionPreference {
+  const v = (process.env.PROJECTION_SOURCE ?? "auto").toLowerCase();
+  return v === "nflverse" || v === "sportsdataio" ? v : "auto";
+}
+
+/**
+ * Best live projection source. `PROJECTION_SOURCE`: "sportsdataio" or "nflverse" to force one;
+ * "auto" (default) prefers a paid SportsDataIO key and falls back to the nflverse model when the
+ * key is missing or a trial key (scrambled data).
+ */
+export async function getLiveSlate(options: SlateOptions = {}): Promise<SlateData | null> {
+  const pref = projectionPreference();
+  let live: SlateData | null;
+  if (pref === "nflverse") {
+    live = (await getNflverseSlate(options)) ?? (await getSportsDataIOSlate());
+  } else if (pref === "sportsdataio") {
+    live = (await getSportsDataIOSlate()) ?? (await getNflverseSlate(options));
+  } else {
+    const sdio = await getSportsDataIOSlate();
+    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : ((await getNflverseSlate(options)) ?? sdio);
+  }
+  if (live) return live;
+
+  const feedPlayers = await fetchFeedPlayers();
+  if (feedPlayers.length > 0) {
+    const { season, week } = await resolveSeasonWeek();
+    return { season, week, source: "DFS feed", salaryCap: DK_CLASSIC_CAP, players: feedPlayers, games: [], notices: [], dkSalaries: null };
+  }
+  return null;
+}
+
+async function getBaseSlate(options: SlateOptions): Promise<SlateData> {
+  const live = await getLiveSlate(options);
+  if (live) return live;
+
+  const db = await getDatabaseSlate();
+  if (db) return db;
+
+  const { season, week } = await resolveSeasonWeek();
+  return {
+    season,
+    week,
+    source: "Sample data",
+    salaryCap: DK_CLASSIC_CAP,
+    players: samplePlayers,
+    games: sampleGames,
+    notices: ["No live data source is reachable. Showing illustrative sample players."],
+    dkSalaries: null,
+  };
 }

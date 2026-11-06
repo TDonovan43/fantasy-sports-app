@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "prisma migrate deploy --config prisma7.config.ts",
+    "db:status": "prisma migrate status --config prisma7.config.ts"
   },
   "dependencies": {
     "@neon/config": "^1.12.0",
