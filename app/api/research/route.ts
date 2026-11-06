@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { getResearchPlayers } from "@/lib/player-data";
+import { getSlateData } from "@/lib/player-data";
 
+/** Full slate: players plus this week's matchups. */
 export async function GET() {
-  const players = await getResearchPlayers();
-  return NextResponse.json({ players });
+  return NextResponse.json(await getSlateData());
 }
