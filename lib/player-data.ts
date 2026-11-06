@@ -4,8 +4,10 @@ import {
   applyDkSalariesToSlate,
   buildSalaryLookup,
   buildStatusLookup,
+  hideOutAndIr,
   type DkSalaryRow,
 } from "@/lib/dk-salaries";
+import { getGameWeather } from "@/lib/weather";
 import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
 import {
@@ -298,7 +300,7 @@ export async function withStoredDkSalaries(slate: SlateData): Promise<SlateData>
 }
 
 export async function getSlateData(): Promise<SlateData> {
-  return withStoredDkSalaries(await getBaseSlate());
+  return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate()));
 }
 
 /**
@@ -337,7 +339,22 @@ export async function getNflverseSlate(): Promise<SlateData | null> {
         ? "Spreads and totals come from the nflverse schedule."
         : "No betting lines are posted for this week yet, so projections use only the opponent adjustment.",
     ];
-    return { season, week, source: "nflverse model", salaryCap: DK_CLASSIC_CAP, players: result.players, games: result.games, notices, dkSalaries: null };
+    const weather = await getGameWeather(result.venues);
+    const games = result.games.map((g) => {
+      const wx = weather.get(g.id);
+      return { ...g, roof: wx?.roof ?? g.roof ?? null, weather: wx?.weather ?? null };
+    });
+    return {
+      season,
+      week,
+      source: "nflverse model",
+      salaryCap: DK_CLASSIC_CAP,
+      players: result.players,
+      games,
+      teams: result.teams,
+      notices,
+      dkSalaries: null,
+    };
   } catch (error) {
     console.error("nflverse projection failed", error);
     return null;

@@ -1,7 +1,7 @@
 import { parseCsvObjects } from "@/lib/csv";
 import { isInactive } from "@/lib/dk-salaries";
 import { round1, round2 } from "@/lib/sportsdataio";
-import type { Matchup, PoolPlayer, Position } from "@/lib/types";
+import type { Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, TeamProfile } from "@/lib/types";
 
 /**
  * FieldGoal projection model built on nflverse data (https://github.com/nflverse/nflverse-data).
@@ -132,6 +132,13 @@ type PlayerGame = {
   points: number;
   usage: number;
   attempts: number;
+  passYds: number;
+  passTds: number;
+  rushYds: number;
+  rushAtt: number;
+  recYds: number;
+  targets: number;
+  receptions: number;
 };
 
 /** Backup QBs keep this share of their projection (garbage time, trick plays). */
@@ -139,7 +146,20 @@ const BACKUP_QB_FACTOR = 0.1;
 /** Pseudo-games of salary prior for a backup QB promoted to starter (his own sample is relief work). */
 const PROMOTED_QB_SHRINK = 6;
 
-type TeamGame = { team: string; opponent: string; gameId: string; season: number; week: number; dstPoints: number; pointsFor: number };
+type TeamGame = {
+  team: string;
+  opponent: string;
+  gameId: string;
+  season: number;
+  week: number;
+  dstPoints: number;
+  pointsFor: number;
+  pointsAllowed: number;
+  passYds: number;
+  rushYds: number;
+  sacks: number;
+  takeaways: number;
+};
 
 type ScheduleGame = {
   gameId: string;
@@ -152,7 +172,14 @@ type ScheduleGame = {
   spread: number | null;
   total: number | null;
   kickoff: string | null;
+  awayMoneyline: number | null;
+  homeMoneyline: number | null;
+  stadiumId: string;
+  stadium: string | null;
+  roof: string | null;
 };
+
+const numOrNull = (v: string | undefined) => (v === undefined || v === "" ? null : n(v));
 
 function parseSchedule(rows: Row[]): ScheduleGame[] {
   return rows
@@ -168,6 +195,11 @@ function parseSchedule(rows: Row[]): ScheduleGame[] {
       spread: r.spread_line === "" ? null : n(r.spread_line),
       total: r.total_line === "" ? null : n(r.total_line),
       kickoff: r.gameday ? `${r.gameday}T${(r.gametime || "13:00").padStart(5, "0")}:00` : null,
+      awayMoneyline: numOrNull(r.away_moneyline),
+      homeMoneyline: numOrNull(r.home_moneyline),
+      stadiumId: r.stadium_id,
+      stadium: r.stadium || null,
+      roof: r.roof || null,
     }));
 }
 
@@ -206,13 +238,104 @@ export type SalaryLookup = (name: string, team: string, position: Position) => n
 /** Injury/status lookup from another source (e.g. DraftKings' Status column). */
 export type StatusLookup = (name: string, team: string, position: Position) => string | null | undefined;
 
+/** Where and when a game is played, for the weather lookup. */
+export type Venue = { gameId: string; stadiumId: string; homeTeam: string; kickoff: string | null; roof: string | null };
+
 export type ProjectionResult = {
   players: PoolPlayer[];
   games: Matchup[];
+  teams: Record<string, TeamProfile>;
+  venues: Venue[];
   /** Last completed week of stats that fed the model. */
   throughWeek: number;
   hasLines: boolean;
 };
+
+function perGame<T>(list: T[], pick: (item: T) => number) {
+  return list.length ? list.reduce((sum, x) => sum + pick(x), 0) / list.length : 0;
+}
+
+/** Ranks values descending: 1 = highest. */
+function rankDesc(values: Map<string, number>) {
+  const sorted = [...values.entries()].sort((a, b) => b[1] - a[1]);
+  return new Map(sorted.map(([team], i) => [team, i + 1]));
+}
+
+const OFFENSE: OffensePosition[] = ["QB", "RB", "WR", "TE"];
+
+/** Season-to-date offense/defense profiles with league ranks. */
+function buildTeamProfiles(seasonGames: TeamGame[], allowed: Map<string, Map<string, number>>): Record<string, TeamProfile> {
+  const byTeam = new Map<string, TeamGame[]>();
+  // Rows keyed by the opponent describe what that opponent allowed.
+  const againstTeam = new Map<string, TeamGame[]>();
+  for (const g of seasonGames) {
+    byTeam.set(g.team, [...(byTeam.get(g.team) ?? []), g]);
+    againstTeam.set(g.opponent, [...(againstTeam.get(g.opponent) ?? []), g]);
+  }
+
+  const metric = (fn: (team: string) => number) => new Map([...byTeam.keys()].map((t) => [t, fn(t)]));
+  const off = (t: string, pick: (g: TeamGame) => number) => perGame(byTeam.get(t) ?? [], pick);
+  const def = (t: string, pick: (g: TeamGame) => number) => perGame(againstTeam.get(t) ?? [], pick);
+  const dk = (t: string, pos: string) => perGame([...(allowed.get(t + "|" + pos)?.values() ?? [])], (x) => x);
+
+  const points = metric((t) => off(t, (g) => g.pointsFor));
+  const passYds = metric((t) => off(t, (g) => g.passYds));
+  const rushYds = metric((t) => off(t, (g) => g.rushYds));
+  const dstAllowed = metric((t) => def(t, (g) => g.dstPoints));
+  const pa = metric((t) => def(t, (g) => g.pointsFor));
+  const passAllowed = metric((t) => def(t, (g) => g.passYds));
+  const rushAllowed = metric((t) => def(t, (g) => g.rushYds));
+  const dkAllowed = Object.fromEntries(OFFENSE.map((pos) => [pos, metric((t) => dk(t, pos))])) as Record<
+    OffensePosition,
+    Map<string, number>
+  >;
+
+  const ranks = {
+    points: rankDesc(points),
+    passYds: rankDesc(passYds),
+    rushYds: rankDesc(rushYds),
+    dstAllowed: rankDesc(dstAllowed),
+    pa: rankDesc(pa),
+    passAllowed: rankDesc(passAllowed),
+    rushAllowed: rankDesc(rushAllowed),
+    dk: Object.fromEntries(OFFENSE.map((pos) => [pos, rankDesc(dkAllowed[pos])])) as Record<OffensePosition, Map<string, number>>,
+  };
+
+  const byPos = <T,>(fn: (pos: OffensePosition) => T) => Object.fromEntries(OFFENSE.map((pos) => [pos, fn(pos)])) as Record<OffensePosition, T>;
+
+  const out: Record<string, TeamProfile> = {};
+  for (const team of byTeam.keys()) {
+    out[team] = {
+      team,
+      games: byTeam.get(team)!.length,
+      offense: {
+        points: round1(points.get(team)!),
+        passYds: round1(passYds.get(team)!),
+        rushYds: round1(rushYds.get(team)!),
+        dstPointsAllowed: round1(dstAllowed.get(team)!),
+        ranks: {
+          points: ranks.points.get(team)!,
+          passYds: ranks.passYds.get(team)!,
+          rushYds: ranks.rushYds.get(team)!,
+          dstPointsAllowed: ranks.dstAllowed.get(team)!,
+        },
+      },
+      defense: {
+        pointsAllowed: round1(pa.get(team)!),
+        passYdsAllowed: round1(passAllowed.get(team)!),
+        rushYdsAllowed: round1(rushAllowed.get(team)!),
+        dkAllowed: byPos((pos) => round1(dkAllowed[pos].get(team)!)),
+        ranks: {
+          pointsAllowed: ranks.pa.get(team)!,
+          passYdsAllowed: ranks.passAllowed.get(team)!,
+          rushYdsAllowed: ranks.rushAllowed.get(team)!,
+          dkAllowed: byPos((pos) => ranks.dk[pos].get(team)!),
+        },
+      },
+    };
+  }
+  return out;
+}
 
 /** Pure projection step: projects `week` of `season` using only games before it. */
 export function projectWeek(
@@ -229,7 +352,19 @@ export function projectWeek(
 
   // ---- Player games (offense) and team defense games -------------------------------------------
   const playerGames: PlayerGame[] = [];
-  const dstByTeamGame = new Map<string, { team: string; opponent: string; gameId: string; season: number; week: number; pts: number }>();
+  type TeamAccumulator = {
+    team: string;
+    opponent: string;
+    gameId: string;
+    season: number;
+    week: number;
+    pts: number;
+    passYds: number;
+    rushYds: number;
+    sacks: number;
+    takeaways: number;
+  };
+  const dstByTeamGame = new Map<string, TeamAccumulator>();
 
   for (const [s, rows] of data.stats) {
     for (const r of rows) {
@@ -241,7 +376,13 @@ export function projectWeek(
 
       // Every player's defensive/special-teams contributions roll up into their team's DST.
       const key = `${r.game_id}|${team}`;
-      const dst = dstByTeamGame.get(key) ?? { team, opponent, gameId: r.game_id, season: s, week: w, pts: 0 };
+      const dst =
+        dstByTeamGame.get(key) ??
+        { team, opponent, gameId: r.game_id, season: s, week: w, pts: 0, passYds: 0, rushYds: 0, sacks: 0, takeaways: 0 };
+      dst.passYds += n(r.passing_yards);
+      dst.rushYds += n(r.rushing_yards);
+      dst.sacks += n(r.def_sacks);
+      dst.takeaways += n(r.def_interceptions) + n(r.fumble_recovery_opp);
       dst.pts +=
         n(r.def_sacks) +
         n(r.def_interceptions) * 2 +
@@ -265,6 +406,13 @@ export function projectWeek(
         points: dkOffensePoints(r),
         usage: n(r.attempts) + n(r.carries) + n(r.targets),
         attempts: n(r.attempts),
+        passYds: n(r.passing_yards),
+        passTds: n(r.passing_tds),
+        rushYds: n(r.rushing_yards),
+        rushAtt: n(r.carries),
+        recYds: n(r.receiving_yards),
+        targets: n(r.targets),
+        receptions: n(r.receptions),
       });
     }
   }
@@ -285,6 +433,11 @@ export function projectWeek(
       week: d.week,
       dstPoints: d.pts + pointsAllowedScore(allowed),
       pointsFor: isHome ? g.homeScore : g.awayScore,
+      pointsAllowed: allowed,
+      passYds: d.passYds,
+      rushYds: d.rushYds,
+      sacks: d.sacks,
+      takeaways: d.takeaways,
     });
   }
 
@@ -332,6 +485,8 @@ export function projectWeek(
     return (list.reduce((s, t) => s + t.pointsFor, 0) + 4 * leaguePpg) / (list.length + 4);
   }
 
+  const teams = buildTeamProfiles(seasonGames, allowed);
+
   const weekGames = schedule.filter((g) => g.season === season && g.week === week);
   const matchupByTeam = new Map<string, { opponent: string; implied: number | null; game: ScheduleGame }>();
   for (const g of weekGames) {
@@ -374,7 +529,17 @@ export function projectWeek(
     return starterOut ? { factor: 1, promoted: true } : { factor: BACKUP_QB_FACTOR, promoted: false };
   }
 
-  type Candidate = { id: string; name: string; position: Position; team: string; mean: number; sd: number; sumW: number; games: number };
+  type Candidate = {
+    id: string;
+    name: string;
+    position: Position;
+    team: string;
+    mean: number;
+    sd: number;
+    sumW: number;
+    games: number;
+    current: PlayerGame[];
+  };
   const candidates: Candidate[] = [];
 
   for (const [playerId, games] of byPlayer) {
@@ -396,7 +561,17 @@ export function projectWeek(
     }));
     const { mean, sd, sumW } = weightedStats(values);
     if (mean <= 0) continue;
-    candidates.push({ id: playerId, name: latest.name, position: latest.position, team: latest.team, mean, sd, sumW, games: kept.length });
+    candidates.push({
+      id: playerId,
+      name: latest.name,
+      position: latest.position,
+      team: latest.team,
+      mean,
+      sd,
+      sumW,
+      games: kept.length,
+      current: kept.filter((g) => g.season === season),
+    });
   }
 
   // Salary-implied prior per position, fitted on players with a decent sample.
@@ -432,7 +607,29 @@ export function projectWeek(
     const cvSd = POSITION_CV[c.position] * projected;
     const sd = Math.sqrt((c.sumW * (c.sd * adj) ** 2 + SHRINK_GAMES * cvSd ** 2) / (c.sumW + SHRINK_GAMES));
     const status = injuryStatus.get(c.id);
+    const avg = (pick: (g: PlayerGame) => number) => round1(perGame(c.current, pick));
+    const research: PlayerResearch = {
+      games: c.current.length,
+      seasonAvg: avg((g) => g.points),
+      last3Avg: round1(perGame(c.current.slice(0, 3), (g) => g.points)),
+      weightedAvg: round1(c.mean),
+      salaryPrior: salary > 0 && priorFn ? round1(prior) : null,
+      baseProjection: round1(base),
+      matchupFactor: round2(opp),
+      vegasFactor: vegas === null ? null : round2(vegas),
+      impliedTotal: m.implied === null ? null : round1(m.implied),
+      roleFactor: role.factor,
+      ...(c.position === "QB"
+        ? { passYds: avg((g) => g.passYds), passTds: round2(perGame(c.current, (g) => g.passTds)), passAtt: avg((g) => g.attempts) }
+        : {}),
+      rushYds: avg((g) => g.rushYds),
+      rushAtt: avg((g) => g.rushAtt),
+      ...(c.position !== "QB"
+        ? { recYds: avg((g) => g.recYds), targets: avg((g) => g.targets), receptions: avg((g) => g.receptions) }
+        : {}),
+    };
     players.push({
+      research,
       id: `nfl-${c.id}`,
       name: c.name,
       position: c.position,
@@ -464,7 +661,23 @@ export function projectWeek(
     const projected = round1(Math.max(0.5, base * (vegas !== null ? Math.sqrt(opp * vegas) : opp)));
     const spread = Math.sqrt((sumW * sd ** 2 + DST_SHRINK_GAMES * (POSITION_CV.DST * projected) ** 2) / (sumW + DST_SHRINK_GAMES));
     const salary = salaryOf?.(`${team} DST`, team, "DST") ?? 0;
+    const current = games.filter((g) => g.season === season);
     players.push({
+      research: {
+        games: current.length,
+        seasonAvg: round1(perGame(current, (g) => g.dstPoints)),
+        last3Avg: round1(perGame(current.slice(0, 3), (g) => g.dstPoints)),
+        weightedAvg: round1(mean),
+        salaryPrior: null,
+        baseProjection: round1(base),
+        matchupFactor: round2(opp),
+        vegasFactor: vegas === null ? null : round2(vegas),
+        impliedTotal: oppImplied === null ? null : round1(oppImplied),
+        roleFactor: 1,
+        sacks: round1(perGame(current, (g) => g.sacks)),
+        takeaways: round1(perGame(current, (g) => g.takeaways)),
+        pointsAllowed: round1(perGame(current, (g) => g.pointsAllowed)),
+      },
       id: `nfl-dst-${team}`,
       name: `${team} DST`,
       position: "DST",
@@ -492,11 +705,24 @@ export function projectWeek(
       overUnder: g.total,
       channel: null,
       status: g.homeScore !== null ? "Final" : "Scheduled",
+      awayMoneyline: g.awayMoneyline,
+      homeMoneyline: g.homeMoneyline,
+      awayScore: g.awayScore,
+      homeScore: g.homeScore,
+      stadium: g.stadium,
+      roof: g.roof,
     }))
     .sort((a, b) => (a.kickoff ?? "").localeCompare(b.kickoff ?? ""));
 
   const throughWeek = Math.max(0, ...playerGames.filter((g) => g.season === season).map((g) => g.week));
-  return { players, games, throughWeek, hasLines: weekGames.some((g) => g.total !== null) };
+  const venues: Venue[] = weekGames.map((g) => ({
+    gameId: g.gameId,
+    stadiumId: g.stadiumId,
+    homeTeam: g.home,
+    kickoff: g.kickoff,
+    roof: g.roof,
+  }));
+  return { players, games, teams, venues, throughWeek, hasLines: weekGames.some((g) => g.total !== null) };
 }
 
 /** Actual DK points per player for a completed week (for backtesting). */

@@ -4,12 +4,20 @@ A Next.js 16 dashboard for DraftKings NFL Classic contests: a filterable player 
 
 ## Features
 
-- **Player board**: the full weekly pool with position tabs (QB/RB/WR/TE/FLEX/DST), search, a game filter (click a matchup), sortable columns, and per-player exclude.
+The dashboard has three tabs (each linkable: `#lineup`, `#research`, `#games`):
+
+- **Lineup builder**: the player pool and lineup panel described below.
+- **Projections**: the inputs behind each projection: weighted, season and last-3 DK points per game, the salary prior, base projection, matchup and Vegas adjustments, implied total, and position-specific per-game stats (passing, rushing, receiving; sacks, takeaways and points allowed for DST). Hover or tap a player to see the opposing defense's DK points allowed to each position, plus points, pass yards and rush yards allowed per game, each with a league rank. For a DST, the card shows the opposing offense instead.
+- **Games & weather**: each game's spread, moneylines, over/under, implied team totals and kickoff-hour forecast (temperature, wind, chance of precipitation, conditions; dome games are marked indoors). Wind of 15+ mph and precipitation chances of 50%+ are flagged.
+
+Players listed **OUT** or **IR** (DraftKings status or the nflverse injury report) are removed from the pool; the header shows how many were hidden.
+
+- **Player pool**: the full weekly pool with position tabs (QB/RB/WR/TE/FLEX/DST), search, a game filter (click a matchup), sortable columns, and per-player exclude.
 - **Lineup builder**: DraftKings Classic slots (QB, 2 RB, 3 WR, TE, FLEX, DST) with a $50K cap and remaining salary per open slot.
 - **Optimizer**: finds the max-projection lineup under the cap, keeping any players you've already added. It's an exact knapsack search, not greedy. If the feed has no defenses, it holds back $3,000 for one.
 - **Export**: once DraftKings salaries are loaded, downloads a DraftKings upload file (slot header + player IDs) for Lineups → Upload Lineups; otherwise a readable CSV.
 - **Injuries**: DraftKings status is shown on the board; the optimizer skips OUT, IR and Doubtful players.
-- **Matchups**: kickoff time, spread and total from SportsDataIO.
+- **Matchups and weather**: lines come from the nflverse schedule (or SportsDataIO with a paid key). Forecasts come from [Open-Meteo](https://open-meteo.com), which is free and needs no key (non-commercial use; a commercial deployment needs an Open-Meteo plan).
 
 ## Data sources
 

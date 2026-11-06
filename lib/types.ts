@@ -26,6 +26,79 @@ export type PoolPlayer = {
   dkId?: string;
   /** True when the projection is DraftKings' season average, not a real projection. */
   projectionFromDkAvg?: boolean;
+  /** Inputs behind the projection (nflverse model only). */
+  research?: PlayerResearch;
+};
+
+/** The numbers that feed a player's projection, all per game unless noted. */
+export type PlayerResearch = {
+  /** Current-season games used by the model. */
+  games: number;
+  /** DK points per game, this season. */
+  seasonAvg: number;
+  last3Avg: number;
+  /** Recency-weighted DK points (includes last season at reduced weight). */
+  weightedAvg: number;
+  /** Salary-implied points prior, when salaries are loaded. */
+  salaryPrior: number | null;
+  /** Projection after shrinkage, before matchup/Vegas/role adjustments. */
+  baseProjection: number;
+  /** Opponent adjustment vs. this position (1 = neutral). */
+  matchupFactor: number;
+  /** Implied team total vs. team scoring average (1 = neutral). */
+  vegasFactor: number | null;
+  /** Team implied total (for DST: the opponent's). */
+  impliedTotal: number | null;
+  /** QB starter/backup adjustment (1 = starter). */
+  roleFactor: number;
+  passYds?: number;
+  passTds?: number;
+  passAtt?: number;
+  rushYds?: number;
+  rushAtt?: number;
+  recYds?: number;
+  targets?: number;
+  receptions?: number;
+  /** DST only. */
+  sacks?: number;
+  takeaways?: number;
+  pointsAllowed?: number;
+};
+
+export type OffensePosition = "QB" | "RB" | "WR" | "TE";
+
+/** Season-to-date team profile. Ranks are 1..N where 1 = the highest value. */
+export type TeamProfile = {
+  team: string;
+  games: number;
+  offense: {
+    points: number;
+    passYds: number;
+    rushYds: number;
+    /** DK points this offense gives up to opposing defenses. */
+    dstPointsAllowed: number;
+    ranks: { points: number; passYds: number; rushYds: number; dstPointsAllowed: number };
+  };
+  defense: {
+    pointsAllowed: number;
+    passYdsAllowed: number;
+    rushYdsAllowed: number;
+    /** DK points allowed to each offensive position. */
+    dkAllowed: Record<OffensePosition, number>;
+    ranks: {
+      pointsAllowed: number;
+      passYdsAllowed: number;
+      rushYdsAllowed: number;
+      dkAllowed: Record<OffensePosition, number>;
+    };
+  };
+};
+
+export type GameWeather = {
+  tempF: number | null;
+  windMph: number | null;
+  precipChance: number | null;
+  conditions: string | null;
 };
 
 export type Matchup = {
@@ -38,6 +111,14 @@ export type Matchup = {
   overUnder: number | null;
   channel: string | null;
   status: string | null;
+  awayMoneyline?: number | null;
+  homeMoneyline?: number | null;
+  awayScore?: number | null;
+  homeScore?: number | null;
+  stadium?: string | null;
+  /** "outdoors", "dome" or "retractable". */
+  roof?: string | null;
+  weather?: GameWeather | null;
 };
 
 export type SlateData = {
@@ -49,6 +130,10 @@ export type SlateData = {
   games: Matchup[];
   /** Human-readable notes about data quality (trial keys, missing DST, etc). */
   notices: string[];
+  /** Season-to-date team profiles keyed by team (nflverse model only). */
+  teams?: Record<string, TeamProfile>;
+  /** Count of players hidden because they are listed OUT or IR. */
+  hiddenInactive?: number;
   /** Set when salaries come from an uploaded DraftKings CSV. */
   dkSalaries: { uploadedAt: string; players: number } | null;
 };

@@ -33,6 +33,21 @@ export function isInactive(injury: string | null | undefined) {
   return !!injury && INACTIVE_STATUSES.has(injury.trim().toUpperCase());
 }
 
+const HIDDEN_STATUSES = new Set(["OUT", "O", "IR"]);
+
+/** True for players ruled OUT or on injured reserve; these are removed from the pool entirely. */
+export function isOutOrIr(injury: string | null | undefined) {
+  return !!injury && HIDDEN_STATUSES.has(injury.trim().toUpperCase());
+}
+
+/** Removes OUT/IR players from a slate, counting how many were hidden. */
+export function hideOutAndIr(slate: SlateData): SlateData {
+  const players = slate.players.filter((p) => !isOutOrIr(p.injury));
+  const removed = slate.players.length - players.length;
+  if (removed === 0) return slate;
+  return { ...slate, players, hiddenInactive: (slate.hiddenInactive ?? 0) + removed };
+}
+
 /** "DET@MIA 11/08/2026 01:00PM ET" -> teams and an Eastern wall-clock ISO string. */
 function parseGameInfo(info: string, team: string) {
   const match = info.match(/^(\w+)@(\w+)\s+(\d{2})\/(\d{2})\/(\d{4})\s+(\d{1,2}):(\d{2})(AM|PM)/i);
@@ -160,6 +175,7 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
       projectionFromDkAvg: !source,
       value: round2(projected / (row.salary / 1000)),
       injury: row.status ?? source?.injury ?? null,
+      research: source?.research,
     });
   }
 
@@ -182,7 +198,7 @@ export function applyDkSalariesToSlate(slate: SlateData, rows: DkSalaryRow[], up
   if (slate.notices.includes(NOTICE_TRIAL)) {
     notices.unshift("SportsDataIO trial key detected: projections and lines are scrambled sample values. Salaries are real.");
   }
-  return { ...slate, players: merged.players, notices, dkSalaries: { uploadedAt, players: rows.length } };
+  return hideOutAndIr({ ...slate, players: merged.players, notices, dkSalaries: { uploadedAt, players: rows.length } });
 }
 
 /** Row lookup over DK rows (name+team, then name+position; defenses by team). */
