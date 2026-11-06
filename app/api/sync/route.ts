@@ -1,11 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
-import { SLATE_GAME_TYPE, getSportsDataIOSlate, withStoredDkSalaries } from "@/lib/player-data";
+import { SLATE_GAME_TYPE, getLiveSlate, withStoredDkSalaries } from "@/lib/player-data";
 
 export const maxDuration = 60;
 
-const SOURCE = "SportsDataIO";
-const MODEL_VERSION = "sdio-dk-v1";
+const MODEL_VERSIONS: Record<string, string> = { SportsDataIO: "sdio-dk-v1", "nflverse model": "fieldgoal-nflverse-v1" };
 
 function authorized(request: NextRequest) {
   const secret = process.env.CRON_SECRET ?? process.env.SYNC_SECRET;
@@ -28,11 +27,13 @@ async function sync(request: NextRequest) {
     return NextResponse.json({ error: "DATABASE_URL is not configured." }, { status: 500 });
   }
 
-  const raw = await getSportsDataIOSlate();
+  const raw = await getLiveSlate();
   const live = raw ? await withStoredDkSalaries(raw) : null;
   if (!live) {
-    return NextResponse.json({ error: "SportsDataIO returned no projections (check SPORTS_DATA_IO_API_KEY)." }, { status: 502 });
+    return NextResponse.json({ error: "No live projection source returned players (SportsDataIO / nflverse)." }, { status: 502 });
   }
+  const SOURCE = live.source;
+  const MODEL_VERSION = MODEL_VERSIONS[live.source] ?? live.source;
 
   const slate = await prisma.slate.upsert({
     where: { source_season_week_gameType: { source: SOURCE, season: live.season, week: live.week, gameType: SLATE_GAME_TYPE } },

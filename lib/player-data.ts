@@ -1,4 +1,12 @@
-import { NOTICE_NO_DST, NOTICE_TRIAL, applyDkSalariesToSlate, type DkSalaryRow } from "@/lib/dk-salaries";
+import {
+  NOTICE_NO_DST,
+  NOTICE_TRIAL,
+  applyDkSalariesToSlate,
+  buildSalaryLookup,
+  buildStatusLookup,
+  type DkSalaryRow,
+} from "@/lib/dk-salaries";
+import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
 import {
   estimateRange,
@@ -166,7 +174,7 @@ export async function getDatabaseSlate(): Promise<SlateData | null> {
   try {
     const slate = await prisma.slate.findFirst({
       where: { gameType: SLATE_GAME_TYPE },
-      orderBy: [{ season: "desc" }, { week: "desc" }],
+      orderBy: [{ season: "desc" }, { week: "desc" }, { updatedAt: "desc" }],
       include: {
         games: { orderBy: { kickoff: "asc" } },
         projections: { include: { player: true } },
@@ -293,20 +301,90 @@ export async function getSlateData(): Promise<SlateData> {
   return withStoredDkSalaries(await getBaseSlate());
 }
 
-async function getBaseSlate(): Promise<SlateData> {
-  const live = await getSportsDataIOSlate();
+/**
+ * Season/week to project: pinned by env, else SportsDataIO's current week, else the first
+ * week in the nflverse schedule with unplayed games.
+ */
+export async function resolveSeasonWeek(): Promise<{ season: number; week: number }> {
+  if ((process.env.SPORTS_DATA_IO_SEASON && process.env.SPORTS_DATA_IO_WEEK) || getSportsDataIOKey()) {
+    return getSeasonWeek();
+  }
+  const fromSchedule = currentWeekFromSchedule(await loadNflverseData(new Date().getFullYear()));
+  return fromSchedule ?? getSeasonWeek();
+}
+
+/** Live slate projected by the FieldGoal model on nflverse data, or null if the data is unavailable. */
+export async function getNflverseSlate(): Promise<SlateData | null> {
+  try {
+    const { season, week } = await resolveSeasonWeek();
+    const data = await loadNflverseData(season);
+    if (!data.stats.get(season)?.length || data.schedule.length === 0) return null;
+
+    const stored = await getStoredDkSalaries(season, week);
+    const result = projectWeek(
+      data,
+      season,
+      week,
+      stored ? buildSalaryLookup(stored.rows) : undefined,
+      DEFAULT_MODEL,
+      stored ? buildStatusLookup(stored.rows) : undefined,
+    );
+    if (result.players.length === 0) return null;
+
+    const notices = [
+      `Projections: FieldGoal model on nflverse stats through week ${result.throughWeek}. It uses recency-weighted DraftKings points, opponent and Vegas adjustments${stored ? ", and a salary prior for small samples" : ""}.`,
+      result.hasLines
+        ? "Spreads and totals come from the nflverse schedule."
+        : "No betting lines are posted for this week yet, so projections use only the opponent adjustment.",
+    ];
+    return { season, week, source: "nflverse model", salaryCap: DK_CLASSIC_CAP, players: result.players, games: result.games, notices, dkSalaries: null };
+  } catch (error) {
+    console.error("nflverse projection failed", error);
+    return null;
+  }
+}
+
+type ProjectionPreference = "auto" | "nflverse" | "sportsdataio";
+
+function projectionPreference(): ProjectionPreference {
+  const v = (process.env.PROJECTION_SOURCE ?? "auto").toLowerCase();
+  return v === "nflverse" || v === "sportsdataio" ? v : "auto";
+}
+
+/**
+ * Best live projection source. `PROJECTION_SOURCE`: "sportsdataio" or "nflverse" to force one;
+ * "auto" (default) prefers a paid SportsDataIO key and falls back to the nflverse model when the
+ * key is missing or a trial key (scrambled data).
+ */
+export async function getLiveSlate(): Promise<SlateData | null> {
+  const pref = projectionPreference();
+  let live: SlateData | null;
+  if (pref === "nflverse") {
+    live = (await getNflverseSlate()) ?? (await getSportsDataIOSlate());
+  } else if (pref === "sportsdataio") {
+    live = (await getSportsDataIOSlate()) ?? (await getNflverseSlate());
+  } else {
+    const sdio = await getSportsDataIOSlate();
+    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : ((await getNflverseSlate()) ?? sdio);
+  }
   if (live) return live;
 
   const feedPlayers = await fetchFeedPlayers();
   if (feedPlayers.length > 0) {
-    const { season, week } = await getSeasonWeek();
+    const { season, week } = await resolveSeasonWeek();
     return { season, week, source: "DFS feed", salaryCap: DK_CLASSIC_CAP, players: feedPlayers, games: [], notices: [], dkSalaries: null };
   }
+  return null;
+}
+
+async function getBaseSlate(): Promise<SlateData> {
+  const live = await getLiveSlate();
+  if (live) return live;
 
   const db = await getDatabaseSlate();
   if (db) return db;
 
-  const { season, week } = await getSeasonWeek();
+  const { season, week } = await resolveSeasonWeek();
   return {
     season,
     week,
@@ -314,7 +392,7 @@ async function getBaseSlate(): Promise<SlateData> {
     salaryCap: DK_CLASSIC_CAP,
     players: samplePlayers,
     games: sampleGames,
-    notices: ["No data source is configured. Showing illustrative sample players; set SPORTS_DATA_IO_API_KEY for live data."],
+    notices: ["No live data source is reachable. Showing illustrative sample players."],
     dkSalaries: null,
   };
 }

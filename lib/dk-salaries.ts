@@ -1,3 +1,4 @@
+import { parseCsv } from "@/lib/csv";
 import { estimateRange, round1, round2, toPosition } from "@/lib/sportsdataio";
 import type { PoolPlayer, Position, SlateData } from "@/lib/types";
 
@@ -30,46 +31,6 @@ const INACTIVE_STATUSES = new Set(["OUT", "IR", "D", "DOUBTFUL", "SUSPENDED", "P
 
 export function isInactive(injury: string | null | undefined) {
   return !!injury && INACTIVE_STATUSES.has(injury.trim().toUpperCase());
-}
-
-/** Minimal RFC 4180 parser (quoted fields, escaped quotes, CRLF). */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"' && text[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else if (ch === '"') {
-        quoted = false;
-      } else {
-        field += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === ",") {
-      row.push(field);
-      field = "";
-    } else if (ch === "\n" || ch === "\r") {
-      if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = "";
-    } else {
-      field += ch;
-    }
-  }
-  if (field || row.length) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
 /** "DET@MIA 11/08/2026 01:00PM ET" -> teams and an Eastern wall-clock ISO string. */
@@ -159,6 +120,7 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
   const byNameTeam = new Map(base.map((p) => [`${normalizeName(p.name)}|${p.team}`, p]));
   const byNamePos = new Map(base.map((p) => [`${normalizeName(p.name)}|${p.position}`, p]));
   const projectedPositions = new Set(base.map((p) => p.position));
+  const dstByTeam = new Map(base.filter((p) => p.position === "DST").map((p) => [p.team, p]));
 
   let matched = 0;
   let avgOnly = 0;
@@ -170,7 +132,8 @@ export function mergeDkSalaries(projections: PoolPlayer[], rows: DkSalaryRow[]):
     const source =
       byDkId.get(row.dkId) ??
       byNameTeam.get(`${key}|${row.team}`) ??
-      byNamePos.get(`${key}|${row.position}`);
+      byNamePos.get(`${key}|${row.position}`) ??
+      (row.position === "DST" ? dstByTeam.get(row.team) : undefined);
 
     const useAverage = !source && !projectedPositions.has(row.position);
     const projected = source ? source.projected : useAverage ? round1(Math.max(0, row.avgPoints)) : 0;
@@ -220,4 +183,25 @@ export function applyDkSalariesToSlate(slate: SlateData, rows: DkSalaryRow[], up
     notices.unshift("SportsDataIO trial key detected: projections and lines are scrambled sample values. Salaries are real.");
   }
   return { ...slate, players: merged.players, notices, dkSalaries: { uploadedAt, players: rows.length } };
+}
+
+/** Row lookup over DK rows (name+team, then name+position; defenses by team). */
+function buildRowLookup(rows: DkSalaryRow[]) {
+  const byNameTeam = new Map(rows.map((r) => [`${normalizeName(r.name)}|${r.team}`, r]));
+  const byNamePos = new Map(rows.map((r) => [`${normalizeName(r.name)}|${r.position}`, r]));
+  const dstByTeam = new Map(rows.filter((r) => r.position === "DST").map((r) => [r.team, r]));
+  return (name: string, team: string, position: Position) =>
+    position === "DST"
+      ? dstByTeam.get(team)
+      : (byNameTeam.get(`${normalizeName(name)}|${team}`) ?? byNamePos.get(`${normalizeName(name)}|${position}`));
+}
+
+export function buildSalaryLookup(rows: DkSalaryRow[]) {
+  const find = buildRowLookup(rows);
+  return (name: string, team: string, position: Position) => find(name, team, position)?.salary;
+}
+
+export function buildStatusLookup(rows: DkSalaryRow[]) {
+  const find = buildRowLookup(rows);
+  return (name: string, team: string, position: Position) => find(name, team, position)?.status;
 }

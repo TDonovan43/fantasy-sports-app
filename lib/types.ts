@@ -1,7 +1,7 @@
 export const POSITIONS = ["QB", "RB", "WR", "TE", "DST"] as const;
 export type Position = (typeof POSITIONS)[number];
 
-export type DataSource = "SportsDataIO" | "DFS feed" | "Database" | "Sample data";
+export type DataSource = "SportsDataIO" | "nflverse model" | "DFS feed" | "Database" | "Sample data";
 
 export type PoolPlayer = {
   /** Stable id, e.g. `sdio-23241`. */
