@@ -8,6 +8,7 @@ import {
   type DkSalaryRow,
 } from "@/lib/dk-salaries";
 import { loadSleeperDepth } from "@/lib/sleeper";
+import { easternToUtcMs } from "@/lib/time";
 import { getGameWeather } from "@/lib/weather";
 import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, loadSchedule, projectWeek } from "@/lib/nflverse";
 import { Prisma } from "@prisma/client";
@@ -362,12 +363,61 @@ export function refreshSlateSnapshot(): Promise<SlateData> {
       } catch (error) {
         console.error("Saving the slate snapshot failed", error);
       }
+      await recordProjections(slate);
     }
     return slate;
   })().finally(() => {
     refreshing = null;
   });
   return refreshing;
+}
+
+/**
+ * Logs each player's projection for accuracy tracking. Only players whose game hasn't kicked off
+ * are written, so after kickoff a player's row keeps his last pre-game projection.
+ */
+async function recordProjections(slate: SlateData) {
+  const now = Date.now();
+  const kickoffByTeam = new Map<string, { gameId: string; kickoff: string | null }>();
+  for (const g of slate.games) {
+    kickoffByTeam.set(g.awayTeam, { gameId: g.id, kickoff: g.kickoff });
+    kickoffByTeam.set(g.homeTeam, { gameId: g.id, kickoff: g.kickoff });
+  }
+  const frozenAt = new Date(now);
+  const rows = slate.players
+    .map((p) => ({ p, game: kickoffByTeam.get(p.team) }))
+    .filter(({ game }) => {
+      const kickoffMs = easternToUtcMs(game?.kickoff);
+      return kickoffMs !== null && kickoffMs > now;
+    })
+    .map(({ p, game }) => ({
+      id: `${slate.season}-${slate.week}-${p.id}`,
+      season: slate.season,
+      week: slate.week,
+      playerKey: p.id,
+      name: p.name,
+      team: p.team,
+      position: p.position,
+      opponent: p.opponent,
+      gameId: game?.gameId ?? null,
+      kickoff: game?.kickoff ?? null,
+      salary: Math.round(p.salary),
+      projected: p.projected,
+      floor: p.floor,
+      ceiling: p.ceiling,
+      injury: p.injury,
+      source: slate.source,
+      frozenAt,
+    }));
+  if (rows.length === 0) return;
+  try {
+    await prisma.$transaction([
+      prisma.projectionLog.deleteMany({ where: { id: { in: rows.map((r) => r.id) } } }),
+      prisma.projectionLog.createMany({ data: rows }),
+    ]);
+  } catch (error) {
+    console.error("Recording projections failed", error);
+  }
 }
 
 async function readSlateSnapshot(): Promise<{ slate: SlateData; ageMs: number } | null> {

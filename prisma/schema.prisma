@@ -186,3 +186,27 @@ model SlateSnapshot {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+/// Each player's last projection before his game kicked off, for accuracy tracking. Rows for a game
+/// stop changing once it starts.
+model ProjectionLog {
+  id        String   @id
+  season    Int
+  week      Int
+  playerKey String
+  name      String
+  team      String
+  position  String
+  opponent  String?
+  gameId    String?
+  kickoff   String?
+  salary    Int
+  projected Float
+  floor     Float
+  ceiling   Float
+  injury    String?
+  source    String
+  frozenAt  DateTime
+
+  @@index([season, week])
+}
