@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import GamesTab from "@/app/components/games-tab";
 import LineupTab from "@/app/components/lineup-tab";
 import ResearchTab from "@/app/components/research-tab";
-import { applyDkSalariesToSlate, parseDkSalariesCsv } from "@/lib/dk-salaries";
+import { applyDkSalariesToSlate, dkFileDates, parseDkSalariesCsv, salaryFileMatchesSlate, shortDate } from "@/lib/dk-salaries";
 import { SLATE_OPTIONS, filterSlate, gameInSlate, type SlateFilter } from "@/lib/slates";
 import { matchesOverride, toggleOverride, type StarterControls } from "@/lib/starters";
 import type { PoolPlayer, SlateData, StarterOverride } from "@/lib/types";
@@ -99,7 +99,10 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
   const slate = useMemo(() => {
     if (!upload) return baseSlate;
     try {
-      return applyDkSalariesToSlate(baseSlate, parseDkSalariesCsv(upload.csv), upload.uploadedAt);
+      const rows = parseDkSalariesCsv(upload.csv);
+      // A saved file from another week never overrides this week's pool.
+      if (salaryFileMatchesSlate(baseSlate, rows) === false) return baseSlate;
+      return applyDkSalariesToSlate(baseSlate, rows, upload.uploadedAt);
     } catch {
       return baseSlate;
     }
@@ -123,6 +126,16 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
     try {
       const csv = await file.text();
       const rows = parseDkSalariesCsv(csv);
+      if (salaryFileMatchesSlate(baseSlate, rows) === false) {
+        const fileDays = dkFileDates(rows).map(shortDate).join(", ");
+        const slateDays = [...new Set(baseSlate.games.map((g) => g.kickoff?.slice(0, 10)).filter((d): d is string => !!d))]
+          .sort()
+          .map(shortDate);
+        setUploadMessage(
+          `Not applied: ${file.name} is for games on ${fileDays}, but the app is showing week ${baseSlate.week} (${slateDays.at(0)} to ${slateDays.at(-1)}). Reload the page once the new week's projections are up, then upload again.`,
+        );
+        return;
+      }
       const next: Upload = { csv, uploadedAt: new Date().toISOString(), fileName: file.name };
       setUpload(next);
       setUploadMessage(`Loaded ${rows.length} DraftKings salaries from ${file.name}. Your lineup was reset for the new pool.`);

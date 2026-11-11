@@ -9,7 +9,7 @@ import {
 } from "@/lib/dk-salaries";
 import { loadSleeperDepth } from "@/lib/sleeper";
 import { getGameWeather } from "@/lib/weather";
-import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, projectWeek } from "@/lib/nflverse";
+import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, loadSchedule, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
 import {
   estimateRange,
@@ -270,7 +270,7 @@ export async function getDatabaseSlate(): Promise<SlateData | null> {
 export async function getSportsDataIOSlate(): Promise<SlateData | null> {
   if (!getSportsDataIOKey()) return null;
 
-  const { season, week } = await getSeasonWeek();
+  const { season, week } = await resolveSeasonWeek();
   const [projections, games] = await Promise.all([getWeekProjections(season, week), getWeekGames(season, week)]);
   if (!projections || projections.players.length === 0) return null;
 
@@ -339,10 +339,11 @@ export async function getSlateData(options: SlateOptions = {}): Promise<SlateDat
  * week in the nflverse schedule with unplayed games.
  */
 export async function resolveSeasonWeek(): Promise<{ season: number; week: number }> {
-  if ((process.env.SPORTS_DATA_IO_SEASON && process.env.SPORTS_DATA_IO_WEEK) || getSportsDataIOKey()) {
-    return getSeasonWeek();
-  }
-  const fromSchedule = currentWeekFromSchedule(await loadNflverseData(new Date().getFullYear()));
+  // An explicit pin always wins.
+  if (process.env.SPORTS_DATA_IO_SEASON && process.env.SPORTS_DATA_IO_WEEK) return getSeasonWeek();
+  // The first week with unplayed games rolls over as soon as Monday night's game ends; SportsDataIO's
+  // "current week" lags until later in the week, which left the app on a week whose games were all final.
+  const fromSchedule = currentWeekFromSchedule({ schedule: await loadSchedule() });
   return fromSchedule ?? getSeasonWeek();
 }
 

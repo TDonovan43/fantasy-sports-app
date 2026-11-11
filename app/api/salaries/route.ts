@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { parseDkSalariesCsv } from "@/lib/dk-salaries";
-import { getStoredDkSalaries } from "@/lib/player-data";
+import { dkFileDates, parseDkSalariesCsv } from "@/lib/dk-salaries";
+import { loadSchedule, weekForDates } from "@/lib/nflverse";
+import { getStoredDkSalaries, resolveSeasonWeek } from "@/lib/player-data";
 import prisma from "@/lib/prisma";
-import { getSeasonWeek } from "@/lib/sportsdataio";
 
 function authorized(request: NextRequest) {
   const secret = process.env.CRON_SECRET ?? process.env.SYNC_SECRET;
@@ -14,7 +14,7 @@ async function targetWeek(request: NextRequest) {
   const season = Number(params.get("season"));
   const week = Number(params.get("week"));
   if (season > 0 && week > 0) return { season, week };
-  return getSeasonWeek();
+  return resolveSeasonWeek();
 }
 
 /** Summary of the DraftKings salaries stored for the current (or ?season=&week=) week. */
@@ -40,7 +40,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Could not parse CSV." }, { status: 400 });
   }
 
-  const { season, week } = await targetWeek(request);
+  // Store the file under the week its games are in (from Game Info dates), unless ?season=&week= is given.
+  const explicit = request.nextUrl.searchParams.has("week");
+  const detected = explicit ? null : weekForDates({ schedule: await loadSchedule() }, dkFileDates(rows));
+  const { season, week } = detected ?? (await targetWeek(request));
   const uploadedAt = new Date();
   await prisma.$transaction([
     prisma.dkSalary.deleteMany({ where: { season, week } }),
@@ -50,7 +53,13 @@ export async function POST(request: NextRequest) {
     }),
   ]);
 
-  return NextResponse.json({ season, week, players: rows.length, uploadedAt: uploadedAt.toISOString() });
+  return NextResponse.json({
+    season,
+    week,
+    weekSource: explicit ? "query" : detected ? "file dates" : "current week",
+    players: rows.length,
+    uploadedAt: uploadedAt.toISOString(),
+  });
 }
 
 /** Removes the week's uploaded salaries. Requires `Authorization: Bearer $CRON_SECRET`. */
