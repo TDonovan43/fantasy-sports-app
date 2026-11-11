@@ -21,21 +21,20 @@ Players listed **OUT** or **IR** (DraftKings status or the nflverse injury repor
 - **Optimizer**: finds the max-projection lineup under the cap, keeping any players you've already added. It's an exact knapsack search, not greedy. If the feed has no defenses, it holds back $3,000 for one.
 - **Export**: once DraftKings salaries are loaded, downloads a DraftKings upload file (slot header + player IDs) for Lineups → Upload Lineups; otherwise a readable CSV.
 - **Injuries**: DraftKings status is shown on the board; the optimizer skips OUT, IR and Doubtful players.
-- **Matchups and weather**: lines come from the nflverse schedule (or SportsDataIO with a paid key). Forecasts come from [Open-Meteo](https://open-meteo.com), which is free and needs no key (non-commercial use; a commercial deployment needs an Open-Meteo plan).
+- **Matchups and weather**: lines come from the nflverse schedule. Forecasts come from [Open-Meteo](https://open-meteo.com), which is free and needs no key (non-commercial use; a commercial deployment needs an Open-Meteo plan).
 
 ## Data sources
 
 `getSlateData()` in `lib/player-data.ts` uses the first source that returns players:
 
-1. **Live projections**, chosen by `PROJECTION_SOURCE` (default `auto`):
-   - **SportsDataIO** (`PlayerGameProjectionStatsByWeek` + `ScoresByWeek`). With `auto`, it's used only when the key is a paid key.
-   - **FieldGoal model on nflverse data** (`lib/nflverse.ts`). It's free, with no R needed; it downloads the [nflverse-data](https://github.com/nflverse/nflverse-data) CSV releases. With `auto`, it's used when the SportsDataIO key is missing or a trial key.
+1. **FieldGoal model on nflverse data** (`lib/nflverse.ts`), the default. It's free, with no R or API key needed; it downloads the [nflverse-data](https://github.com/nflverse/nflverse-data) CSV releases. The current week also comes from the nflverse schedule (the first week with unplayed games).
+   - **SportsDataIO** is used only when `PROJECTION_SOURCE=sportsdataio` (for a paid key). It is never called otherwise, and a trial key's scrambled data is never shown; the nflverse model is used instead.
 2. **`DFS_FEED_URL`**: any JSON feed of player rows. Common field names are detected automatically.
 3. **Database**: the last slate written by `/api/sync`.
 4. **Sample data**: a small illustrative pool, so the UI still works offline.
 
 Floor and ceiling are estimated from the projection and positional volatility unless the source supplies them.
-A SportsDataIO trial key returns scrambled salaries and lines; the dashboard shows a notice when it detects one.
+If nflverse can't be reached, the app shows the last slate saved by `/api/sync` rather than any scrambled data.
 
 ## Projection model (nflverse)
 
@@ -63,7 +62,7 @@ The model only adjusts roles for QBs, so an RB or WR whose role changed recently
 
 ## DraftKings salaries
 
-SportsDataIO trial keys scramble salaries, so the real salaries come from DraftKings' own file. On DraftKings, open any **Classic** contest for the slate and choose **Export to CSV** (`DKSalaries.csv`). Then do one of the following:
+Salaries come from DraftKings' own file. On DraftKings, open any **Classic** contest for the slate and choose **Export to CSV** (`DKSalaries.csv`). Then do one of the following:
 
 - **Browser upload**: click **Upload DK salaries** on the dashboard. It applies instantly and is remembered in that browser for the week.
 - **Shared (database) upload**: everyone sees it, and the next sync stores it.
@@ -72,13 +71,13 @@ SportsDataIO trial keys scramble salaries, so the real salaries come from DraftK
   curl -X POST -H "Authorization: Bearer $CRON_SECRET" -H "Content-Type: text/csv"     --data-binary @DKSalaries.csv https://<your-app>/api/salaries
   ```
 
-When a file is loaded, the pool is limited to that slate. Salaries, DraftKings IDs and injury status come from DraftKings, and projections stay from SportsDataIO. Players are matched by name and team, or by name and position if a player changed teams. Defenses have no SportsDataIO projection, so they use DraftKings' average points per game (marked "avg"). Unmatched players at other positions are dropped, because SportsDataIO leaving them out means it projects them at 0.
+When a file is loaded, the pool is limited to that slate. Salaries, DraftKings IDs and injury status come from DraftKings, and projections stay from the model. Players are matched by name and team, or by name and position if a player changed teams. If the projection source has no players at a position (defenses under SportsDataIO), they use DraftKings' average points per game (marked "avg"). Other unmatched players go to the "Show unprojected" list.
 
 ## Setup
 
 ```bash
 npm install            # also runs prisma generate
-cp .env.example .env.local   # fill in DATABASE_URL, SPORTS_DATA_IO_API_KEY, CRON_SECRET
+cp .env.example .env.local   # fill in DATABASE_URL and CRON_SECRET
 npm run db:migrate     # apply migrations in prisma/migrations
 npm run dev
 ```
@@ -101,7 +100,7 @@ npm run db:migrate
 | `GET /api/games` | This week's matchups |
 | `GET /api/salaries` | Uploaded DraftKings salary count for the week |
 | `POST/DELETE /api/salaries` | Replace or clear the week's DraftKings salaries (raw CSV body). Requires `Authorization: Bearer $CRON_SECRET`. |
-| `GET/POST /api/sync` | Writes the current SportsDataIO slate to Postgres. Requires `Authorization: Bearer $CRON_SECRET`. Runs daily via `vercel.json`. |
+| `GET/POST /api/sync` | Writes the current live slate to Postgres. Requires `Authorization: Bearer $CRON_SECRET`. Runs daily via `vercel.json`. |
 
 ## Scripts
 

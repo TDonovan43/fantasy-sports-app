@@ -1,5 +1,5 @@
 import { parseCsv } from "@/lib/csv";
-import { estimateRange, round1, round2, toPosition } from "@/lib/sportsdataio";
+import { estimateRange, round1, round2, toPosition } from "@/lib/model-utils";
 import type { PoolPlayer, Position, SlateData } from "@/lib/types";
 
 /** One row of DraftKings' "Export to CSV" salary file (DKSalaries.csv). */

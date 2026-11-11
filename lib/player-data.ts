@@ -11,16 +11,9 @@ import { loadSleeperDepth } from "@/lib/sleeper";
 import { getGameWeather } from "@/lib/weather";
 import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, loadSchedule, projectWeek } from "@/lib/nflverse";
 import prisma from "@/lib/prisma";
-import {
-  estimateRange,
-  getSeasonWeek,
-  getSportsDataIOKey,
-  getWeekGames,
-  getWeekProjections,
-  round1,
-  round2,
-  toPosition,
-} from "@/lib/sportsdataio";
+import { estimateRange, round1, round2, toPosition } from "@/lib/model-utils";
+// SportsDataIO is only called when PROJECTION_SOURCE=sportsdataio.
+import { getSeasonWeek, getSportsDataIOKey, getWeekGames, getWeekProjections } from "@/lib/sportsdataio";
 import type { Matchup, OffensePosition, PoolPlayer, Position, SlateData, StarterOverride } from "@/lib/types";
 
 export type SlateOptions = {
@@ -334,17 +327,39 @@ export async function getSlateData(options: SlateOptions = {}): Promise<SlateDat
   return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate(options)));
 }
 
+/** `NFL_SEASON` + `NFL_WEEK` (or the older `SPORTS_DATA_IO_SEASON` / `_WEEK`) pin the week. */
+function pinnedSeasonWeek(): { season: number; week: number } | null {
+  const season = Number(process.env.NFL_SEASON ?? process.env.SPORTS_DATA_IO_SEASON);
+  const week = Number(process.env.NFL_WEEK ?? process.env.SPORTS_DATA_IO_WEEK);
+  return season > 0 && week > 0 ? { season, week } : null;
+}
+
+/** Most recent week saved by /api/sync, used when the nflverse schedule can't be loaded. */
+async function latestSyncedWeek(): Promise<{ season: number; week: number } | null> {
+  if (!process.env.DATABASE_URL) return null;
+  try {
+    return await prisma.slate.findFirst({
+      where: { gameType: SLATE_GAME_TYPE },
+      orderBy: [{ season: "desc" }, { week: "desc" }],
+      select: { season: true, week: true },
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Season/week to project: pinned by env, else SportsDataIO's current week, else the first
- * week in the nflverse schedule with unplayed games.
+ * Season/week to project, without SportsDataIO unless it's the chosen source:
+ * an env pin, else the first nflverse schedule week with unplayed games (rolls over as soon as
+ * Monday night's game ends), else the last synced week.
  */
 export async function resolveSeasonWeek(): Promise<{ season: number; week: number }> {
-  // An explicit pin always wins.
-  if (process.env.SPORTS_DATA_IO_SEASON && process.env.SPORTS_DATA_IO_WEEK) return getSeasonWeek();
-  // The first week with unplayed games rolls over as soon as Monday night's game ends; SportsDataIO's
-  // "current week" lags until later in the week, which left the app on a week whose games were all final.
+  const pinned = pinnedSeasonWeek();
+  if (pinned) return pinned;
   const fromSchedule = currentWeekFromSchedule({ schedule: await loadSchedule() });
-  return fromSchedule ?? getSeasonWeek();
+  if (fromSchedule) return fromSchedule;
+  if (projectionPreference() === "sportsdataio") return getSeasonWeek();
+  return (await latestSyncedWeek()) ?? { season: new Date().getFullYear(), week: 1 };
 }
 
 /** Live slate projected by the FieldGoal model on nflverse data, or null if the data is unavailable. */
@@ -395,28 +410,25 @@ export async function getNflverseSlate(options: SlateOptions = {}): Promise<Slat
   }
 }
 
-type ProjectionPreference = "auto" | "nflverse" | "sportsdataio";
+type ProjectionPreference = "nflverse" | "sportsdataio";
 
+/** nflverse (free) unless `PROJECTION_SOURCE=sportsdataio`; the old "auto" value means nflverse. */
 function projectionPreference(): ProjectionPreference {
-  const v = (process.env.PROJECTION_SOURCE ?? "auto").toLowerCase();
-  return v === "nflverse" || v === "sportsdataio" ? v : "auto";
+  return (process.env.PROJECTION_SOURCE ?? "").toLowerCase() === "sportsdataio" ? "sportsdataio" : "nflverse";
 }
 
 /**
- * Best live projection source. `PROJECTION_SOURCE`: "sportsdataio" or "nflverse" to force one;
- * "auto" (default) prefers a paid SportsDataIO key and falls back to the nflverse model when the
- * key is missing or a trial key (scrambled data).
+ * Live slate from the chosen projection source. SportsDataIO is never called unless chosen, and a
+ * trial key's scrambled data is never shown: the nflverse model is used instead. When no live
+ * source works, the caller falls back to the last slate saved in the database.
  */
 export async function getLiveSlate(options: SlateOptions = {}): Promise<SlateData | null> {
-  const pref = projectionPreference();
   let live: SlateData | null;
-  if (pref === "nflverse") {
-    live = (await getNflverseSlate(options)) ?? (await getSportsDataIOSlate());
-  } else if (pref === "sportsdataio") {
-    live = (await getSportsDataIOSlate()) ?? (await getNflverseSlate(options));
-  } else {
+  if (projectionPreference() === "sportsdataio") {
     const sdio = await getSportsDataIOSlate();
-    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : ((await getNflverseSlate(options)) ?? sdio);
+    live = sdio && !sdio.notices.includes(NOTICE_TRIAL) ? sdio : await getNflverseSlate(options);
+  } else {
+    live = await getNflverseSlate(options);
   }
   if (live) return live;
 

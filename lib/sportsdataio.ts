@@ -1,4 +1,5 @@
-import type { Matchup, PoolPlayer, Position } from "@/lib/types";
+import { estimateRange, round1, round2, toPosition } from "@/lib/model-utils";
+import type { Matchup, PoolPlayer } from "@/lib/types";
 
 const BASE_URL = "https://api.sportsdata.io/v3/nfl";
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -59,27 +60,6 @@ export async function getSeasonWeek(): Promise<{ season: number; week: number }>
     season: num(season) || envSeason || new Date().getFullYear(),
     week: num(week) || envWeek || 1,
   };
-}
-
-/** Position volatility (coefficient of variation) used to estimate floor/ceiling. */
-const VOLATILITY: Record<Position, number> = { QB: 0.3, RB: 0.42, WR: 0.48, TE: 0.5, DST: 0.6 };
-
-export function estimateRange(position: Position, projected: number) {
-  const cv = VOLATILITY[position];
-  return {
-    floor: Math.max(0, round1(projected * (1 - 0.67 * cv))),
-    ceiling: round1(projected * (1 + 1.28 * cv)),
-  };
-}
-
-export const round1 = (n: number) => Math.round(n * 10) / 10;
-export const round2 = (n: number) => Math.round(n * 100) / 100;
-
-export function toPosition(raw: unknown): Position | null {
-  const p = String(raw ?? "").toUpperCase();
-  if (p === "QB" || p === "RB" || p === "WR" || p === "TE") return p;
-  if (p === "DST" || p === "DEF" || p === "D/ST" || p === "D") return "DST";
-  return null;
 }
 
 export type SdioWeek = {
