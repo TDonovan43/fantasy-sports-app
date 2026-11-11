@@ -2,7 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { isInactive } from "@/lib/dk-salaries";
-import { formatKickoff, formatLine, money } from "@/lib/format";
+import { formatKickoff, formatLine, impliedTotals, money } from "@/lib/format";
+import { DEFAULT_STACK_RULES, NO_RULES, describeStack, type StackRules } from "@/lib/stack-rules";
 import {
   ROSTER_SLOTS,
   assignSlots,
@@ -26,7 +27,7 @@ type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
 const PAGE_SIZE = 50;
 const TOP_VALUE_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
-const RANDOMNESS = { low: 0.25, medium: 0.5, high: 1 } as const;
+const RANDOMNESS = { none: 0, low: 0.25, medium: 0.5, high: 1 } as const;
 type Randomness = keyof typeof RANDOMNESS;
 const MAX_LINEUPS = 50;
 
@@ -77,6 +78,9 @@ export default function LineupTab({
   const [maxExposurePct, setMaxExposurePct] = useState(60);
   const [randomness, setRandomness] = useState<Randomness>("medium");
   const [built, setBuilt] = useState<MultiLineupResult | null>(null);
+  const [stackRules, setStackRules] = useState<StackRules>(DEFAULT_STACK_RULES);
+  const [maxStackExposurePct, setMaxStackExposurePct] = useState(40);
+  const [busy, setBusy] = useState<null | "optimize" | "build">(null);
 
   /** Projected players plus (optionally) unprojected ones, which can only be added by hand. */
   const pool = useMemo(
@@ -185,36 +189,131 @@ export default function LineupTab({
     removePlayer(id);
   }
 
+  const opponentOf = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const g of slate.games) {
+      map.set(g.awayTeam, g.homeTeam);
+      map.set(g.homeTeam, g.awayTeam);
+    }
+    return map;
+  }, [slate.games]);
+
+  /** Teams that can anchor a QB stack (in the selected games), highest implied total first. */
+  const stackTeamOptions = useMemo(() => {
+    const games = activeGames.length ? activeGames : slate.games;
+    const withQb = new Set(slate.players.filter((p) => p.position === "QB").map((p) => p.team));
+    return games
+      .flatMap((g) => {
+        const it = impliedTotals(g);
+        return [
+          { team: g.awayTeam, implied: it?.away ?? null },
+          { team: g.homeTeam, implied: it?.home ?? null },
+        ];
+      })
+      .filter((t) => withQb.has(t.team))
+      .sort((a, b) => (b.implied ?? 0) - (a.implied ?? 0));
+  }, [activeGames, slate.games, slate.players]);
+
+  const stacking = stackRules.qbStack > 0;
+  const rulesOff = !stacking && stackRules.bringBack === 0 && !stackRules.avoidVsDst && stackRules.maxPerTeam >= 9;
+
+  function setRule<K extends keyof StackRules>(key: K, value: StackRules[K]) {
+    setStackRules((r) => ({ ...r, [key]: value }));
+  }
+
+  function toggleStackTeam(team: string) {
+    setStackRules((r) => {
+      const current = r.stackTeams ?? [];
+      const next = current.includes(team) ? current.filter((t) => t !== team) : [...current, team];
+      return { ...r, stackTeams: next.length ? next : null };
+    });
+  }
+
   /** Players the optimizer may use: the selected games (or all), plus anyone already in the lineup. */
   function optimizerPool() {
     const everyone = [...slate.players, ...(slate.unprojected ?? [])];
     return selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lineupIds.includes(p.id)) : everyone;
   }
 
-  function buildLineups() {
+  type SolverResponse = { lineups: { ids: string[]; salary: number; projected: number }[]; exposure: Record<string, number>; warnings: string[] };
+
+  /** Asks the server's integer-programming solver (with the stacking rules) for one or more lineups. */
+  async function callSolver(extra: Record<string, unknown>): Promise<SolverResponse> {
+    const players = optimizerPool().map(({ id, name, position, team, salary, projected, floor, ceiling, injury }) => ({
+      id,
+      name,
+      position,
+      team,
+      salary,
+      projected,
+      floor,
+      ceiling,
+      injury,
+    }));
+    const res = await fetch("/api/optimize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        players,
+        games: slate.games.map(({ id, awayTeam, homeTeam }) => ({ id, awayTeam, homeTeam })),
+        salaryCap: slate.salaryCap,
+        lockedIds: lineupIds,
+        excludedIds,
+        rules: stackRules,
+        ...extra,
+      }),
+    });
+    const json = (await res.json()) as SolverResponse & { error?: string };
+    if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+    return json;
+  }
+
+  const toPlayers = (ids: string[]) => ids.map((id) => byId.get(id)).filter((p): p is PoolPlayer => !!p);
+  const FALLBACK_NOTE = " The stacking solver was unavailable, so stacking rules weren't applied.";
+
+  async function buildLineups() {
     if (selectedTeams && activeGames.length < 2) {
       setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
       return;
     }
     const count = Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount)));
-    const result = generateLineups({
-      pool: optimizerPool(),
-      salaryCap: slate.salaryCap,
-      lockedIds: lineupIds,
-      excludedIds,
+    const settings = {
       count,
       minUnique: Math.min(9, Math.max(1, Math.round(minUnique))),
       maxExposure: Math.min(100, Math.max(10, maxExposurePct)) / 100,
       randomness: RANDOMNESS[randomness],
       // A new seed each click, so "Build" again gives a different set.
       seed: Math.floor(Math.random() * 2 ** 31),
-      gameOf: (p) => gameOfTeam.get(p.team) ?? p.team,
-    });
+    };
+    setBusy("build");
+    setMessage(`Building ${count} lineups…`);
+    let result: MultiLineupResult;
+    let note = "";
+    try {
+      const r = await callSolver({ ...settings, maxStackExposure: Math.min(100, Math.max(5, maxStackExposurePct)) / 100 });
+      result = {
+        lineups: r.lineups.map((l) => ({ players: toPlayers(l.ids), salary: l.salary, projected: l.projected })),
+        exposure: new Map(Object.entries(r.exposure)),
+        warnings: r.warnings,
+      };
+    } catch {
+      result = generateLineups({
+        pool: optimizerPool(),
+        salaryCap: slate.salaryCap,
+        lockedIds: lineupIds,
+        excludedIds,
+        ...settings,
+        gameOf: (p) => gameOfTeam.get(p.team) ?? p.team,
+      });
+      note = FALLBACK_NOTE;
+    } finally {
+      setBusy(null);
+    }
     setBuilt(result);
     setMessage(
       result.lineups.length
-        ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lineupIds.length ? ` around your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.`
-        : (result.warnings.at(0) ?? "Couldn't build lineups with these settings."),
+        ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lineupIds.length ? ` around your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.${note}`
+        : (result.warnings.at(0) ?? "Couldn't build lineups with these settings.") + note,
     );
   }
 
@@ -230,26 +329,43 @@ export default function LineupTab({
     }
   }
 
-  function runOptimizer() {
+  async function runOptimizer() {
     if (selectedTeams && activeGames.length < 2) {
       setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
       return;
     }
     // Unprojected players are only used if you've added them yourself (they're locked in).
     // With games selected, only their players are eligible; your current picks stay locked in either way.
-    const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
-    if (!result.ok) {
-      setMessage(selectedTeams ? `${result.reason} Try selecting more games.` : result.reason);
+    setBusy("optimize");
+    let picked: { players: PoolPlayer[]; salary: number; projected: number } | null = null;
+    let failure: string | null = null;
+    let note = "";
+    try {
+      const r = await callSolver({ count: 1 });
+      const l = r.lineups.at(0);
+      if (l) picked = { players: toPlayers(l.ids), salary: l.salary, projected: l.projected };
+      else failure = r.warnings.at(0) ?? "No lineup found.";
+    } catch {
+      const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
+      if (result.ok) picked = result;
+      else failure = result.reason;
+      note = FALLBACK_NOTE;
+    } finally {
+      setBusy(null);
+    }
+    if (!picked) {
+      setMessage((selectedTeams ? `${failure} Try selecting more games.` : (failure ?? "No lineup found.")) + note);
       return;
     }
-    setLineupIds(result.players.map((p) => p.id));
-    const gamesUsed = new Set(result.players.map((p) => gameOfTeam.get(p.team) ?? p.team)).size;
+    setLineupIds(picked.players.map((p) => p.id));
+    const gamesUsed = new Set(picked.players.map((p) => gameOfTeam.get(p.team) ?? p.team)).size;
     const kept = lineupIds.length ? ` Kept your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}.` : "";
     const scope = selectedTeams ? ` from ${activeGames.length} selected games` : "";
+    const stack = stacking && !note ? describeStack(picked.players, opponentOf, stackRules) : null;
     setMessage(
       gamesUsed < 2
         ? `Heads up: every player is from one game, which DraftKings Classic doesn't allow. Select or add players from another game.`
-        : `Optimal lineup${scope}: ${result.projected.toFixed(1)} pts for ${money(result.salary)}.${kept}`,
+        : `Optimal lineup${scope}: ${picked.projected.toFixed(1)} pts for ${money(picked.salary)}.${stack ? ` ${stack.label}.` : ""}${kept}${note}`,
     );
   }
 
@@ -546,8 +662,12 @@ export default function LineupTab({
           {message && <p className="mt-4 rounded-xl bg-slate-800/70 px-3 py-2 text-sm text-slate-200">{message}</p>}
 
           <div className="mt-4 grid grid-cols-2 gap-2">
-            <button onClick={runOptimizer} className="col-span-2 rounded-full bg-emerald-400 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-emerald-300">
-              {lineup.length > 0 ? "Optimize around picks" : "Optimize lineup"}
+            <button
+              onClick={runOptimizer}
+              disabled={busy !== null}
+              className="col-span-2 rounded-full bg-emerald-400 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
+            >
+              {busy === "optimize" ? "Optimizing…" : lineup.length > 0 ? "Optimize around picks" : "Optimize lineup"}
             </button>
             <button onClick={exportLineup} className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold hover:border-slate-500">
               Export
@@ -563,6 +683,109 @@ export default function LineupTab({
             </button>
           </div>
           {!hasDst && <p className="mt-3 text-xs text-slate-500">Optimizer holds back $3,000 for a defense.</p>}
+
+          <div className="mt-6 border-t border-slate-800 pt-5">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="font-bold">Stacking</h3>
+              <button
+                onClick={() => setStackRules(rulesOff ? DEFAULT_STACK_RULES : NO_RULES)}
+                className="text-xs text-emerald-300 hover:text-white"
+              >
+                {rulesOff ? "Use defaults" : "No rules"}
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-slate-500">Applies to Optimize and Build multiple lineups.</p>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+              <label className="flex flex-col gap-1 text-slate-400" title="Pass catchers from the QB's own team in every lineup">
+                QB stack
+                <select
+                  value={stackRules.qbStack}
+                  onChange={(e) => setRule("qbStack", Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value={0}>None</option>
+                  <option value={1}>QB + 1</option>
+                  <option value={2}>QB + 2</option>
+                  <option value={3}>QB + 3</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-slate-400" title="Players from the QB's opponent (RB, WR or TE)">
+                Bring-back
+                <select
+                  value={stackRules.bringBack}
+                  onChange={(e) => setRule("bringBack", Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value={0}>None</option>
+                  <option value={1}>1 player</option>
+                  <option value={2}>2 players</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-slate-400" title="Most players from one team, defense included">
+                Max per team
+                <select
+                  value={stackRules.maxPerTeam}
+                  onChange={(e) => setRule("maxPerTeam", Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  {[3, 4, 5, 6, 7, 8].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                  <option value={9}>No limit</option>
+                </select>
+              </label>
+              <div className="flex flex-col justify-end gap-1.5 text-slate-300">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={stackRules.stackPositions.includes("RB")}
+                    onChange={(e) =>
+                      setRule("stackPositions", e.target.checked ? ["RB", "WR", "TE"] : ["WR", "TE"])
+                    }
+                    disabled={!stacking}
+                    className="h-4 w-4 accent-emerald-400"
+                  />
+                  RB counts in stack
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={stackRules.avoidVsDst}
+                    onChange={(e) => setRule("avoidVsDst", e.target.checked)}
+                    className="h-4 w-4 accent-emerald-400"
+                  />
+                  None vs my DST
+                </label>
+              </div>
+            </div>
+            {stacking && stackTeamOptions.length > 0 && (
+              <div className="mt-3">
+                <p className="mb-1 text-xs text-slate-400">
+                  Stack teams <span className="text-slate-500">({stackRules.stackTeams?.length ? `${stackRules.stackTeams.length} chosen` : "any"}; by implied total)</span>
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {stackTeamOptions.map(({ team, implied }) => {
+                    const on = stackRules.stackTeams?.includes(team) ?? false;
+                    return (
+                      <button
+                        key={team}
+                        onClick={() => toggleStackTeam(team)}
+                        aria-pressed={on}
+                        className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                          on ? "border-emerald-400 bg-emerald-400 text-slate-950" : "border-slate-700 text-slate-300 hover:border-slate-500"
+                        }`}
+                      >
+                        {team}
+                        {implied !== null && <span className={on ? "ml-1 text-slate-800" : "ml-1 text-slate-500"}>{implied.toFixed(1)}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="mt-6 border-t border-slate-800 pt-5">
             <h3 className="font-bold">Build multiple lineups</h3>
@@ -611,17 +834,33 @@ export default function LineupTab({
                   onChange={(e) => setRandomness(e.target.value as Randomness)}
                   className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
                 >
+                  <option value="none">None (next best)</option>
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
                 </select>
               </label>
+              {stacking && (
+                <label className="col-span-2 flex flex-col gap-1 text-slate-400" title="No team's QB stack appears in more than this share of lineups">
+                  Max % of lineups per stack team
+                  <input
+                    type="number"
+                    min={5}
+                    max={100}
+                    step={5}
+                    value={maxStackExposurePct}
+                    onChange={(e) => setMaxStackExposurePct(Number(e.target.value))}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                  />
+                </label>
+              )}
             </div>
             <button
               onClick={buildLineups}
-              className="mt-3 w-full rounded-full border border-emerald-400 px-4 py-2 text-sm font-bold text-emerald-300 hover:bg-emerald-400 hover:text-slate-950"
+              disabled={busy !== null}
+              className="mt-3 w-full rounded-full border border-emerald-400 px-4 py-2 text-sm font-bold text-emerald-300 hover:bg-emerald-400 hover:text-slate-950 disabled:opacity-60"
             >
-              {built ? "Build again" : `Build ${Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount) || 1))} lineups`}
+              {busy === "build" ? "Building…" : built ? "Build again" : `Build ${Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount) || 1))} lineups`}
             </button>
           </div>
         </aside>
@@ -631,6 +870,8 @@ export default function LineupTab({
         <BuiltLineups
           result={built}
           players={byId}
+          opponentOf={opponentOf}
+          rules={stackRules}
           onLoad={(ids) => {
             setLineupIds(ids);
             setMessage("Loaded into the editor.");
@@ -646,17 +887,25 @@ export default function LineupTab({
 function BuiltLineups({
   result,
   players,
+  opponentOf,
+  rules,
   onLoad,
   onExport,
   onClear,
 }: {
   result: MultiLineupResult;
   players: Map<string, PoolPlayer>;
+  opponentOf: Map<string, string>;
+  rules: StackRules;
   onLoad: (ids: string[]) => void;
   onExport: () => void;
   onClear: () => void;
 }) {
   const { lineups, exposure, warnings } = result;
+  const stacks = lineups.map((l) => describeStack(l.players, opponentOf, rules));
+  const stackShare = [...stacks.reduce((m, st) => (st ? m.set(st.team, (m.get(st.team) ?? 0) + 1) : m), new Map<string, number>())]
+    .sort((a, b) => b[1] - a[1])
+    .map(([team, n]) => ({ team, pct: Math.round((n / lineups.length) * 100) }));
   const ranked = lineups.map((l, i) => ({ l, n: i + 1 })).sort((a, b) => b.l.projected - a.l.projected);
   const avg = lineups.reduce((sum, l) => sum + l.projected, 0) / lineups.length;
   const mostUsed = [...exposure]
@@ -684,6 +933,20 @@ function BuiltLineups({
 
       {warnings.length > 0 && <p className="mt-3 rounded-xl bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{warnings.join(" ")}</p>}
 
+      {stackShare.length > 0 && (
+        <div className="mt-4">
+          <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">QB stacks by team: share of lineups</p>
+          <div className="flex flex-wrap gap-2">
+            {stackShare.map(({ team, pct }) => (
+              <span key={team} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs">
+                <span className="font-semibold text-white">{team}</span>
+                <span className="ml-2 text-amber-300">{pct}%</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-4">
         <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Exposure: share of lineups each player is in</p>
         <div className="flex flex-wrap gap-2">
@@ -700,6 +963,7 @@ function BuiltLineups({
       <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {ranked.map(({ l, n }) => {
           const slots = assignSlots(l.players) ?? [];
+          const stack = stacks.at(n - 1);
           return (
             <article key={n} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
               <div className="mb-2 flex items-baseline justify-between">
@@ -709,6 +973,7 @@ function BuiltLineups({
                   <span className="ml-2 text-slate-500">{money(l.salary)}</span>
                 </p>
               </div>
+              {stack && <p className="mb-2 text-xs text-sky-300">{stack.label}</p>}
               <ol className="space-y-0.5 text-sm">
                 {ROSTER_SLOTS.map((slot, i) => {
                   const p = slots[i];
