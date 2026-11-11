@@ -174,6 +174,18 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
             <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
               Week {slate.week} · {slate.season}
             </span>
+            {slate.generatedAt && (
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-400" title="Projections are rebuilt every 15 minutes and after each salary upload">
+                Updated{" "}
+                {new Date(slate.generatedAt).toLocaleString("en-US", {
+                  weekday: "short",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  timeZone: "America/New_York",
+                })}{" "}
+                ET
+              </span>
+            )}
             <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-3 py-1 text-emerald-300">{slate.source}</span>
             <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
               {slate.players.length} players

@@ -153,4 +153,6 @@ export type SlateData = {
   unprojected?: PoolPlayer[];
   /** Set when salaries come from an uploaded DraftKings CSV. */
   dkSalaries: { uploadedAt: string; players: number } | null;
+  /** When this slate was built (ISO). Pages serve a saved snapshot, so this can be minutes old. */
+  generatedAt?: string;
 };

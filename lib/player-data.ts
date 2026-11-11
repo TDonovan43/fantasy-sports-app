@@ -10,6 +10,8 @@ import {
 import { loadSleeperDepth } from "@/lib/sleeper";
 import { getGameWeather } from "@/lib/weather";
 import { DEFAULT_MODEL, currentWeekFromSchedule, loadNflverseData, loadSchedule, projectWeek } from "@/lib/nflverse";
+import { Prisma } from "@prisma/client";
+import { after } from "next/server";
 import prisma from "@/lib/prisma";
 import { estimateRange, round1, round2, toPosition } from "@/lib/model-utils";
 // SportsDataIO is only called when PROJECTION_SOURCE=sportsdataio.
@@ -323,8 +325,80 @@ export async function withStoredDkSalaries(slate: SlateData): Promise<SlateData>
   return stored ? applyDkSalariesToSlate(slate, stored.rows, stored.uploadedAt) : slate;
 }
 
+/** Builds the slate from the sources (slow on a cold server: downloads stats, schedule, Sleeper). */
+async function computeSlateData(options: SlateOptions = {}): Promise<SlateData> {
+  const slate = hideOutAndIr(await withStoredDkSalaries(await getBaseSlate(options)));
+  return { ...slate, generatedAt: new Date().toISOString() };
+}
+
+// ---- Snapshot: the finished default slate, saved in the database --------------------------------
+
+const SNAPSHOT_ID = "current";
+/** Served as-is while younger than this. */
+const SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
+/** Older than this, a visitor waits for a fresh build instead of seeing stale data. */
+const SNAPSHOT_MAX_STALE_MS = 24 * 60 * 60 * 1000;
+const LIVE_SOURCES = new Set<SlateData["source"]>(["nflverse model", "SportsDataIO", "DFS feed"]);
+
+let refreshing: Promise<SlateData> | null = null;
+
+/**
+ * Rebuilds the default slate and saves it as the snapshot. Only live data is saved, so a temporary
+ * outage never replaces a good snapshot with the database fallback or sample players. Concurrent
+ * calls on one server share the same build.
+ */
+export function refreshSlateSnapshot(): Promise<SlateData> {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    const slate = await computeSlateData();
+    if (process.env.DATABASE_URL && LIVE_SOURCES.has(slate.source)) {
+      try {
+        const data = JSON.parse(JSON.stringify(slate)) as Prisma.InputJsonValue;
+        await prisma.slateSnapshot.upsert({
+          where: { id: SNAPSHOT_ID },
+          update: { season: slate.season, week: slate.week, source: slate.source, data },
+          create: { id: SNAPSHOT_ID, season: slate.season, week: slate.week, source: slate.source, data },
+        });
+      } catch (error) {
+        console.error("Saving the slate snapshot failed", error);
+      }
+    }
+    return slate;
+  })().finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
+}
+
+async function readSlateSnapshot(): Promise<{ slate: SlateData; ageMs: number } | null> {
+  if (!process.env.DATABASE_URL) return null;
+  try {
+    const row = await prisma.slateSnapshot.findUnique({ where: { id: SNAPSHOT_ID } });
+    if (!row) return null;
+    return { slate: row.data as unknown as SlateData, ageMs: Date.now() - row.updatedAt.getTime() };
+  } catch (error) {
+    console.error("Reading the slate snapshot failed", error);
+    return null;
+  }
+}
+
+/**
+ * The slate pages and APIs show. The default slate comes from the saved snapshot: served directly
+ * while fresh; when stale it's still served immediately and rebuilt in the background. Slates with
+ * manual starters are personal, so they're always computed.
+ */
 export async function getSlateData(options: SlateOptions = {}): Promise<SlateData> {
-  return hideOutAndIr(await withStoredDkSalaries(await getBaseSlate(options)));
+  if (options.starters?.length) return computeSlateData(options);
+
+  const snapshot = await readSlateSnapshot();
+  if (snapshot && snapshot.ageMs < SNAPSHOT_FRESH_MS) return snapshot.slate;
+  if (snapshot && snapshot.ageMs < SNAPSHOT_MAX_STALE_MS) {
+    after(async () => {
+      await refreshSlateSnapshot();
+    });
+    return snapshot.slate;
+  }
+  return refreshSlateSnapshot();
 }
 
 /** `NFL_SEASON` + `NFL_WEEK` (or the older `SPORTS_DATA_IO_SEASON` / `_WEEK`) pin the week. */

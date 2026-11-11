@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
-import { SLATE_GAME_TYPE, getLiveSlate, withStoredDkSalaries } from "@/lib/player-data";
+import { SLATE_GAME_TYPE, getLiveSlate, refreshSlateSnapshot, withStoredDkSalaries } from "@/lib/player-data";
 
 export const maxDuration = 60;
 
@@ -101,6 +101,9 @@ async function sync(request: NextRequest) {
     }),
     prisma.slate.update({ where: { id: slate.id }, data: { updatedAt: new Date() } }),
   ]);
+
+  // Also refresh the saved slate that pages serve.
+  await refreshSlateSnapshot();
 
   return NextResponse.json({
     slateId: slate.id,
