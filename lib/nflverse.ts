@@ -57,6 +57,11 @@ function fetchCsv(url: string): Promise<Row[]> {
   return value;
 }
 
+/** Just the schedule (all seasons), for working out which week is current. */
+export function loadSchedule(): Promise<Row[]> {
+  return fetchCsv(`${RELEASES}/schedules/games.csv`);
+}
+
 export async function loadNflverseData(season: number): Promise<NflverseData> {
   const [current, prior, older, schedule, injuries] = await Promise.all([
     fetchCsv(`${RELEASES}/stats_player/stats_player_week_${season}.csv`),
@@ -211,8 +216,27 @@ function parseSchedule(rows: Row[]): ScheduleGame[] {
     }));
 }
 
-/** Latest season/week in the schedule that still has unplayed games. */
-export function currentWeekFromSchedule(data: NflverseData): { season: number; week: number } | null {
+/**
+ * The regular-season week whose game days include the most of `dates` (YYYY-MM-DD, Eastern),
+ * e.g. the kickoff dates in a DraftKings salary file. Null when none match.
+ */
+export function weekForDates(data: Pick<NflverseData, "schedule">, dates: string[]): { season: number; week: number } | null {
+  const wanted = new Set(dates);
+  const counts = new Map<string, { season: number; week: number; hits: number }>();
+  for (const g of parseSchedule(data.schedule)) {
+    const day = g.kickoff?.slice(0, 10);
+    if (!day || !wanted.has(day)) continue;
+    const key = `${g.season}-${g.week}`;
+    const entry = counts.get(key) ?? { season: g.season, week: g.week, hits: 0 };
+    entry.hits++;
+    counts.set(key, entry);
+  }
+  const best = [...counts.values()].sort((a, b) => b.hits - a.hits).at(0);
+  return best ? { season: best.season, week: best.week } : null;
+}
+
+/** First season/week in the schedule that still has unplayed games. */
+export function currentWeekFromSchedule(data: Pick<NflverseData, "schedule">): { season: number; week: number } | null {
   const upcoming = parseSchedule(data.schedule)
     .filter((g) => g.homeScore === null)
     .sort((a, b) => a.season - b.season || a.week - b.week);

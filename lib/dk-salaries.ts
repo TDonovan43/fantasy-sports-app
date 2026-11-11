@@ -247,3 +247,25 @@ export function buildStatusLookup(rows: DkSalaryRow[]) {
   const find = buildRowLookup(rows);
   return (name: string, team: string, position: Position) => find(name, team, position)?.status;
 }
+
+/** Kickoff dates (YYYY-MM-DD) in a salary file. */
+export function dkFileDates(rows: DkSalaryRow[]) {
+  return [...new Set(rows.map((r) => r.kickoff?.slice(0, 10)).filter((d): d is string => !!d))].sort();
+}
+
+/**
+ * Whether a salary file is for this slate's games: at least one kickoff date in common.
+ * Returns null (can't tell) when either side has no dates.
+ */
+export function salaryFileMatchesSlate(slate: SlateData, rows: DkSalaryRow[]): boolean | null {
+  const fileDates = dkFileDates(rows);
+  const slateDates = new Set(slate.games.map((g) => g.kickoff?.slice(0, 10)).filter(Boolean));
+  if (fileDates.length === 0 || slateDates.size === 0) return null;
+  return fileDates.some((d) => slateDates.has(d));
+}
+
+/** "Nov 15" from "2026-11-15". */
+export function shortDate(day: string) {
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${months.at(Number(day.slice(5, 7)) - 1) ?? ""} ${Number(day.slice(8, 10))}`;
+}
