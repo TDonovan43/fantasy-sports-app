@@ -174,3 +174,15 @@ model DkSalary {
 
   @@index([season, week])
 }
+
+/// The finished slate (projections, salaries, games, teams) served to pages, so visitors don't wait
+/// for nflverse/Sleeper downloads. One row per key; "current" is the default slate.
+model SlateSnapshot {
+  id        String   @id
+  season    Int
+  week      Int
+  source    String
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

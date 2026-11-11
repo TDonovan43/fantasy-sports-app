@@ -1,8 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { dkFileDates, parseDkSalariesCsv } from "@/lib/dk-salaries";
 import { loadSchedule, weekForDates } from "@/lib/nflverse";
-import { getStoredDkSalaries, resolveSeasonWeek } from "@/lib/player-data";
+import { getStoredDkSalaries, refreshSlateSnapshot, resolveSeasonWeek } from "@/lib/player-data";
 import prisma from "@/lib/prisma";
+
+export const maxDuration = 60;
 
 function authorized(request: NextRequest) {
   const secret = process.env.CRON_SECRET ?? process.env.SYNC_SECRET;
@@ -53,12 +55,16 @@ export async function POST(request: NextRequest) {
     }),
   ]);
 
+  // Rebuild the saved slate now so the next page view shows the new salaries.
+  const snapshot = await refreshSlateSnapshot();
+
   return NextResponse.json({
     season,
     week,
     weekSource: explicit ? "query" : detected ? "file dates" : "current week",
     players: rows.length,
     uploadedAt: uploadedAt.toISOString(),
+    snapshot: { week: snapshot.week, source: snapshot.source, players: snapshot.players.length },
   });
 }
 
@@ -69,5 +75,6 @@ export async function DELETE(request: NextRequest) {
   }
   const { season, week } = await targetWeek(request);
   const { count } = await prisma.dkSalary.deleteMany({ where: { season, week } });
+  await refreshSlateSnapshot();
   return NextResponse.json({ season, week, deleted: count });
 }
