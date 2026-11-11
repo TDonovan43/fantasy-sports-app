@@ -208,3 +208,153 @@ export function lineupToCsv(players: PoolPlayer[]): string {
   rows.push(["Total", "", "", "", "", String(lineupSalary(players)), lineupProjection(players).toFixed(1)]);
   return rows.map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(",")).join("\n");
 }
+
+// ---- Multiple lineups ---------------------------------------------------------------------------
+
+export type MultiLineupOptions = OptimizeOptions & {
+  /** How many lineups to build. */
+  count: number;
+  /** Each lineup must differ from every earlier one by at least this many players. */
+  minUnique: number;
+  /** Max share of lineups (0–1) any one player may appear in; locked players are exempt. */
+  maxExposure: number;
+  /** How far projections are nudged, in multiples of each player's own spread (0 = none). */
+  randomness: number;
+  /** Seed for the random nudges, so the same settings give the same lineups. */
+  seed?: number;
+  /** Maps a player to his game, to enforce DraftKings' 2-game rule. */
+  gameOf?: (p: PoolPlayer) => string;
+};
+
+export type BuiltLineup = { players: PoolPlayer[]; salary: number; projected: number };
+
+export type MultiLineupResult = {
+  lineups: BuiltLineup[];
+  /** Player id -> number of lineups he appears in. */
+  exposure: Map<string, number>;
+  warnings: string[];
+};
+
+/** Small deterministic PRNG (mulberry32). */
+function seededRandom(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Standard normal draw (Box–Muller). */
+function gaussian(random: () => number) {
+  const u = Math.max(random(), 1e-12);
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * random());
+}
+
+const MAX_ATTEMPTS = 40;
+/** After this many near-duplicate attempts, start excluding the most-used overlapping player. */
+const EXCLUDE_AFTER = 8;
+
+/**
+ * Builds several different lineups. The first is the optimal lineup; each later one re-optimizes on
+ * projections nudged at random within each player's own floor–ceiling spread, and is kept only if it
+ * differs from every earlier lineup by at least `minUnique` players, keeps everyone under the
+ * exposure cap and uses 2+ games. Scores and salaries shown are always the real projections.
+ */
+export function generateLineups(options: MultiLineupOptions): MultiLineupResult {
+  const { pool, salaryCap, lockedIds = [], excludedIds = [], dstReserve, count, minUnique, maxExposure, randomness, gameOf } = options;
+  const random = seededRandom(options.seed ?? 1);
+  const locked = new Set(lockedIds);
+  const cap = Math.max(1, Math.floor(maxExposure * count + 1e-9));
+  const exposure = new Map<string, number>();
+  const lineups: BuiltLineup[] = [];
+  const previous: Set<string>[] = [];
+  const warnings: string[] = [];
+  const byId = new Map(pool.map((p) => [p.id, p]));
+
+  for (let i = 0; i < count; i++) {
+    let accepted: BuiltLineup | null = null;
+    let lastReason = "";
+    const extraExcluded = new Set<string>();
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS && !accepted; attempt++) {
+      const scale = i === 0 && attempt === 0 ? 0 : randomness * (1 + attempt / 10);
+      const capped = [...exposure].filter(([id, n]) => n >= cap && !locked.has(id)).map(([id]) => id);
+      const nudged =
+        scale === 0
+          ? pool
+          : pool.map((p) => {
+              if (p.projected <= 0) return p;
+              const sigma = Math.max((p.ceiling - p.floor) / 2.12, 0.15 * p.projected);
+              return { ...p, projected: Math.max(0.01, p.projected + scale * gaussian(random) * sigma) };
+            });
+      const result = optimizeLineup({
+        pool: nudged,
+        salaryCap,
+        lockedIds,
+        excludedIds: [...excludedIds, ...capped, ...extraExcluded],
+        dstReserve,
+      });
+      if (!result.ok) {
+        lastReason = result.reason;
+        // Nothing to vary away from yet: the settings can't produce even one lineup.
+        if (lineups.length === 0 && capped.length === 0 && extraExcluded.size === 0) break;
+        continue;
+      }
+
+      const ids = result.players.map((p) => p.id);
+      const tooClose = previous.find((prev) => ids.filter((id) => prev.has(id)).length > ids.length - minUnique);
+      const oneGame = !!gameOf && new Set(result.players.map(gameOf)).size < 2;
+      if (tooClose || oneGame) {
+        if (tooClose && attempt >= EXCLUDE_AFTER) {
+          const overlap = ids
+            .filter((id) => tooClose.has(id) && !locked.has(id) && !extraExcluded.has(id))
+            .sort((a, b) => (exposure.get(b) ?? 0) - (exposure.get(a) ?? 0));
+          if (overlap[0]) extraExcluded.add(overlap[0]);
+        }
+        continue;
+      }
+
+      const players = ids.map((id) => byId.get(id)!);
+      accepted = { players, salary: lineupSalary(players), projected: lineupProjection(players) };
+      previous.push(new Set(ids));
+      for (const id of ids) exposure.set(id, (exposure.get(id) ?? 0) + 1);
+    }
+
+    if (!accepted) {
+      warnings.push(
+        lineups.length === 0
+          ? lastReason || "Couldn't build a lineup with these settings."
+          : `Built ${lineups.length} of ${count}: no other lineup differs by ${minUnique}+ players within the ${Math.round(maxExposure * 100)}% exposure limit. Loosen a setting or select more games.`,
+      );
+      break;
+    }
+    lineups.push(accepted);
+  }
+
+  return { lineups, exposure, warnings };
+}
+
+/** DraftKings bulk-upload file with one row per lineup; null unless every slot of every lineup has a DK ID. */
+export function lineupsToDraftKingsCsv(lineups: BuiltLineup[]): string | null {
+  const rows: string[] = [ROSTER_SLOTS.join(",")];
+  for (const l of lineups) {
+    const slots = assignSlots(l.players);
+    if (!slots || slots.some((p) => !p?.dkId)) return null;
+    rows.push(slots.map((p) => p!.dkId).join(","));
+  }
+  return rows.join("\n");
+}
+
+/** Readable CSV of several lineups: one row per lineup with player names by slot, salary and projection. */
+export function lineupsToCsv(lineups: BuiltLineup[]): string {
+  const esc = (c: string) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c);
+  const rows = [["Lineup", ...ROSTER_SLOTS, "Salary", "Projected"]];
+  lineups.forEach((l, i) => {
+    const slots = assignSlots(l.players) ?? [];
+    rows.push([String(i + 1), ...ROSTER_SLOTS.map((_, s) => slots[s]?.name ?? ""), String(l.salary), l.projected.toFixed(1)]);
+  });
+  return rows.map((r) => r.map(esc).join(",")).join("\n");
+}
