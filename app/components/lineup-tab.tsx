@@ -11,7 +11,11 @@ import {
   lineupSalary,
   lineupToCsv,
   lineupToDraftKingsCsv,
+  lineupsToCsv,
+  lineupsToDraftKingsCsv,
+  generateLineups,
   optimizeLineup,
+  type MultiLineupResult,
 } from "@/lib/optimizer";
 import type { StarterControls } from "@/lib/starters";
 import type { PoolPlayer, Position, SlateData } from "@/lib/types";
@@ -22,6 +26,9 @@ type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
 const PAGE_SIZE = 50;
 const TOP_VALUE_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
+const RANDOMNESS = { low: 0.25, medium: 0.5, high: 1 } as const;
+type Randomness = keyof typeof RANDOMNESS;
+const MAX_LINEUPS = 50;
 
 export function StartButton({ marked, pending, onClick }: { marked: boolean; pending: boolean; onClick: () => void }) {
   return (
@@ -65,6 +72,11 @@ export default function LineupTab({
   const [lineupIds, setLineupIds] = useState<string[]>([]);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [multiCount, setMultiCount] = useState(5);
+  const [minUnique, setMinUnique] = useState(2);
+  const [maxExposurePct, setMaxExposurePct] = useState(60);
+  const [randomness, setRandomness] = useState<Randomness>("medium");
+  const [built, setBuilt] = useState<MultiLineupResult | null>(null);
 
   /** Projected players plus (optionally) unprojected ones, which can only be added by hand. */
   const pool = useMemo(
@@ -173,6 +185,51 @@ export default function LineupTab({
     removePlayer(id);
   }
 
+  /** Players the optimizer may use: the selected games (or all), plus anyone already in the lineup. */
+  function optimizerPool() {
+    const everyone = [...slate.players, ...(slate.unprojected ?? [])];
+    return selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lineupIds.includes(p.id)) : everyone;
+  }
+
+  function buildLineups() {
+    if (selectedTeams && activeGames.length < 2) {
+      setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
+      return;
+    }
+    const count = Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount)));
+    const result = generateLineups({
+      pool: optimizerPool(),
+      salaryCap: slate.salaryCap,
+      lockedIds: lineupIds,
+      excludedIds,
+      count,
+      minUnique: Math.min(9, Math.max(1, Math.round(minUnique))),
+      maxExposure: Math.min(100, Math.max(10, maxExposurePct)) / 100,
+      randomness: RANDOMNESS[randomness],
+      // A new seed each click, so "Build" again gives a different set.
+      seed: Math.floor(Math.random() * 2 ** 31),
+      gameOf: (p) => gameOfTeam.get(p.team) ?? p.team,
+    });
+    setBuilt(result);
+    setMessage(
+      result.lineups.length
+        ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lineupIds.length ? ` around your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.`
+        : (result.warnings.at(0) ?? "Couldn't build lineups with these settings."),
+    );
+  }
+
+  function exportBuilt() {
+    if (!built?.lineups.length) return;
+    const dk = lineupsToDraftKingsCsv(built.lineups);
+    if (dk) {
+      downloadCsv(`DKUpload-week${slate.week}-${built.lineups.length}-lineups.csv`, dk);
+      setMessage(`Downloaded ${built.lineups.length} lineups for DraftKings: Lineups → Upload Lineups.`);
+    } else {
+      downloadCsv(`fieldgoal-week${slate.week}-${built.lineups.length}-lineups.csv`, lineupsToCsv(built.lineups));
+      setMessage("Downloaded a readable CSV. Upload your DKSalaries.csv to get a DraftKings upload file.");
+    }
+  }
+
   function runOptimizer() {
     if (selectedTeams && activeGames.length < 2) {
       setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
@@ -180,9 +237,7 @@ export default function LineupTab({
     }
     // Unprojected players are only used if you've added them yourself (they're locked in).
     // With games selected, only their players are eligible; your current picks stay locked in either way.
-    const everyone = [...slate.players, ...(slate.unprojected ?? [])];
-    const optimizerPool = selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lineupIds.includes(p.id)) : everyone;
-    const result = optimizeLineup({ pool: optimizerPool, salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
+    const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
     if (!result.ok) {
       setMessage(selectedTeams ? `${result.reason} Try selecting more games.` : result.reason);
       return;
@@ -508,8 +563,174 @@ export default function LineupTab({
             </button>
           </div>
           {!hasDst && <p className="mt-3 text-xs text-slate-500">Optimizer holds back $3,000 for a defense.</p>}
+
+          <div className="mt-6 border-t border-slate-800 pt-5">
+            <h3 className="font-bold">Build multiple lineups</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Lineup 1 is the optimal one; the rest vary players while staying strong. Players in the editor stay in every lineup.
+            </p>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+              <label className="flex flex-col gap-1 text-slate-400">
+                Lineups
+                <input
+                  type="number"
+                  min={1}
+                  max={MAX_LINEUPS}
+                  value={multiCount}
+                  onChange={(e) => setMultiCount(Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-slate-400" title="Each lineup differs from every other by at least this many players">
+                Min. different players
+                <input
+                  type="number"
+                  min={1}
+                  max={9}
+                  value={minUnique}
+                  onChange={(e) => setMinUnique(Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-slate-400" title="No player appears in more than this share of lineups (players you added are exempt)">
+                Max exposure %
+                <input
+                  type="number"
+                  min={10}
+                  max={100}
+                  step={5}
+                  value={maxExposurePct}
+                  onChange={(e) => setMaxExposurePct(Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-slate-400" title="How much projections are shaken up within each player's floor-to-ceiling range">
+                Randomness
+                <select
+                  value={randomness}
+                  onChange={(e) => setRandomness(e.target.value as Randomness)}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+            </div>
+            <button
+              onClick={buildLineups}
+              className="mt-3 w-full rounded-full border border-emerald-400 px-4 py-2 text-sm font-bold text-emerald-300 hover:bg-emerald-400 hover:text-slate-950"
+            >
+              {built ? "Build again" : `Build ${Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount) || 1))} lineups`}
+            </button>
+          </div>
         </aside>
       </div>
+
+      {built && built.lineups.length > 0 && (
+        <BuiltLineups
+          result={built}
+          players={byId}
+          onLoad={(ids) => {
+            setLineupIds(ids);
+            setMessage("Loaded into the editor.");
+          }}
+          onExport={exportBuilt}
+          onClear={() => setBuilt(null)}
+        />
+      )}
     </>
+  );
+}
+
+function BuiltLineups({
+  result,
+  players,
+  onLoad,
+  onExport,
+  onClear,
+}: {
+  result: MultiLineupResult;
+  players: Map<string, PoolPlayer>;
+  onLoad: (ids: string[]) => void;
+  onExport: () => void;
+  onClear: () => void;
+}) {
+  const { lineups, exposure, warnings } = result;
+  const ranked = lineups.map((l, i) => ({ l, n: i + 1 })).sort((a, b) => b.l.projected - a.l.projected);
+  const avg = lineups.reduce((sum, l) => sum + l.projected, 0) / lineups.length;
+  const mostUsed = [...exposure]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15)
+    .map(([id, n]) => ({ p: players.get(id), pct: Math.round((n / lineups.length) * 100) }))
+    .filter((x): x is { p: PoolPlayer; pct: number } => !!x.p);
+
+  return (
+    <section aria-label="Built lineups" className="mt-8 rounded-3xl border border-slate-800 bg-slate-900/70 p-5">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="mr-auto">
+          <h2 className="text-2xl font-bold">Built lineups ({lineups.length})</h2>
+          <p className="text-xs text-slate-500">
+            Best {ranked[0].l.projected.toFixed(1)} · average {avg.toFixed(1)} · lowest {ranked.at(-1)!.l.projected.toFixed(1)} projected points
+          </p>
+        </div>
+        <button onClick={onExport} className="rounded-full bg-emerald-400 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-emerald-300">
+          Export all
+        </button>
+        <button onClick={onClear} className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold hover:border-slate-500">
+          Clear
+        </button>
+      </div>
+
+      {warnings.length > 0 && <p className="mt-3 rounded-xl bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{warnings.join(" ")}</p>}
+
+      <div className="mt-4">
+        <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Exposure: share of lineups each player is in</p>
+        <div className="flex flex-wrap gap-2">
+          {mostUsed.map(({ p, pct }) => (
+            <span key={p.id} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs">
+              <span className="font-semibold text-white">{p.name}</span>
+              <span className="ml-1 text-slate-500">{p.position}</span>
+              <span className="ml-2 text-amber-300">{pct}%</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {ranked.map(({ l, n }) => {
+          const slots = assignSlots(l.players) ?? [];
+          return (
+            <article key={n} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+              <div className="mb-2 flex items-baseline justify-between">
+                <p className="font-bold">Lineup {n}</p>
+                <p className="text-sm">
+                  <span className="font-bold text-emerald-300">{l.projected.toFixed(1)} pts</span>
+                  <span className="ml-2 text-slate-500">{money(l.salary)}</span>
+                </p>
+              </div>
+              <ol className="space-y-0.5 text-sm">
+                {ROSTER_SLOTS.map((slot, i) => {
+                  const p = slots[i];
+                  return (
+                    <li key={`${slot}-${i}`} className="flex gap-2">
+                      <span className="w-9 shrink-0 text-xs font-bold leading-5 text-slate-500">{slot}</span>
+                      <span className="min-w-0 flex-1 truncate">{p?.name ?? "—"}</span>
+                      <span className="shrink-0 text-xs leading-5 text-slate-500">{p ? `${p.team} · ${money(p.salary)}` : ""}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+              <button
+                onClick={() => onLoad(l.players.map((p) => p.id))}
+                className="mt-3 w-full rounded-full border border-slate-700 px-3 py-1.5 text-xs font-semibold hover:border-emerald-400 hover:text-emerald-300"
+              >
+                Load into editor
+              </button>
+            </article>
+          );
+        })}
+      </div>
+    </section>
   );
 }
