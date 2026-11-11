@@ -57,7 +57,8 @@ export default function LineupTab({
   starterControls: StarterControls;
 }) {
   const [position, setPosition] = useState<PositionFilter>("ALL");
-  const [gameFilter, setGameFilter] = useState<string | null>(null);
+  /** Games chosen in the strip; empty = every game in the slate. */
+  const [selectedGameIds, setSelectedGameIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "projected", desc: true });
   const [visible, setVisible] = useState(PAGE_SIZE);
@@ -81,30 +82,59 @@ export default function LineupTab({
   const openSlots = slots.filter((s) => s === null).length;
   const hasDst = slate.players.some((p) => p.position === "DST");
 
+  /** Selected games still in this slate (the DK slate selector can remove some). */
+  const activeGames = useMemo(() => slate.games.filter((g) => selectedGameIds.includes(g.id)), [slate.games, selectedGameIds]);
+  /** Teams in the selected games, or null when no game is selected (= all games). */
+  const selectedTeams = useMemo(
+    () => (activeGames.length ? new Set(activeGames.flatMap((g) => [g.awayTeam, g.homeTeam])) : null),
+    [activeGames],
+  );
+  const gameOfTeam = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const g of slate.games) {
+      map.set(g.awayTeam, g.id);
+      map.set(g.homeTeam, g.id);
+    }
+    return map;
+  }, [slate.games]);
+  const playersPerGame = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of slate.players) {
+      const id = gameOfTeam.get(p.team);
+      if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return counts;
+  }, [slate.players, gameOfTeam]);
+  const selectedPlayerCount = selectedTeams ? slate.players.filter((p) => selectedTeams.has(p.team)).length : slate.players.length;
+
+  function toggleGame(id: string) {
+    setSelectedGameIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+    setVisible(PAGE_SIZE);
+  }
+
   /** Best points-per-$1K player at each position among those the optimizer could use. */
   const topValue = useMemo(() => {
     const best = new Map<Position, PoolPlayer>();
     for (const p of slate.players) {
       if (p.salary <= 0 || p.projected <= 0 || isInactive(p.injury) || excludedIds.includes(p.id)) continue;
+      if (selectedTeams && !selectedTeams.has(p.team)) continue;
       const cur = best.get(p.position);
       if (!cur || p.value > cur.value || (p.value === cur.value && p.projected > cur.projected)) best.set(p.position, p);
     }
     return best;
-  }, [slate.players, excludedIds]);
-
-  const selectedGame = slate.games.find((g) => g.id === gameFilter) ?? null;
+  }, [slate.players, excludedIds, selectedTeams]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = pool.filter((p) => {
       if (position === "FLEX" ? !["RB", "WR", "TE"].includes(p.position) : position !== "ALL" && p.position !== position) return false;
-      if (selectedGame && p.team !== selectedGame.awayTeam && p.team !== selectedGame.homeTeam) return false;
+      if (selectedTeams && !selectedTeams.has(p.team)) return false;
       if (q && !p.name.toLowerCase().includes(q) && !p.team.toLowerCase().includes(q)) return false;
       return true;
     });
     const dir = sort.desc ? -1 : 1;
     return rows.sort((a, b) => (sort.key === "name" ? a.name.localeCompare(b.name) : a[sort.key] - b[sort.key]) * dir);
-  }, [pool, position, selectedGame, query, sort]);
+  }, [pool, position, selectedTeams, query, sort]);
 
   function resetPaging<T>(fn: (v: T) => void) {
     return (v: T) => {
@@ -144,15 +174,27 @@ export default function LineupTab({
   }
 
   function runOptimizer() {
+    if (selectedTeams && activeGames.length < 2) {
+      setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
+      return;
+    }
     // Unprojected players are only used if you've added them yourself (they're locked in).
-    const result = optimizeLineup({ pool: [...slate.players, ...(slate.unprojected ?? [])], salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
+    // With games selected, only their players are eligible; your current picks stay locked in either way.
+    const everyone = [...slate.players, ...(slate.unprojected ?? [])];
+    const optimizerPool = selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lineupIds.includes(p.id)) : everyone;
+    const result = optimizeLineup({ pool: optimizerPool, salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
     if (!result.ok) {
-      setMessage(result.reason);
+      setMessage(selectedTeams ? `${result.reason} Try selecting more games.` : result.reason);
       return;
     }
     setLineupIds(result.players.map((p) => p.id));
+    const gamesUsed = new Set(result.players.map((p) => gameOfTeam.get(p.team) ?? p.team)).size;
+    const kept = lineupIds.length ? ` Kept your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}.` : "";
+    const scope = selectedTeams ? ` from ${activeGames.length} selected games` : "";
     setMessage(
-      `Optimal lineup: ${result.projected.toFixed(1)} pts for ${money(result.salary)}${lineupIds.length ? ` (kept your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""})` : ""}.`,
+      gamesUsed < 2
+        ? `Heads up: every player is from one game, which DraftKings Classic doesn't allow. Select or add players from another game.`
+        : `Optimal lineup${scope}: ${result.projected.toFixed(1)} pts for ${money(result.salary)}.${kept}`,
     );
   }
 
@@ -186,31 +228,54 @@ export default function LineupTab({
   return (
     <>
       {slate.games.length > 0 && (
-        <section aria-label="Filter by game" className="mb-6">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm uppercase tracking-[0.22em] text-slate-400">Filter by game</h2>
-            {selectedGame && (
-              <button onClick={() => resetPaging(setGameFilter)(null)} className="text-xs text-emerald-300 hover:text-white">
-                Clear game filter
-              </button>
-            )}
+        <section aria-label="Games" className="mb-6">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <h2 className="text-sm uppercase tracking-[0.22em] text-slate-400">Games</h2>
+              <p className="text-xs text-slate-500">Select one or more games to limit the player pool and the optimizer.</p>
+            </div>
+            <div className="flex items-center gap-3 text-xs">
+              <span className="text-slate-400">
+                {activeGames.length ? `${activeGames.length} of ${slate.games.length} selected` : "All games"} · {selectedPlayerCount} players
+              </span>
+              {activeGames.length > 0 && (
+                <button onClick={() => resetPaging(setSelectedGameIds)([])} className="text-emerald-300 hover:text-white">
+                  All in slate
+                </button>
+              )}
+            </div>
           </div>
           <div className="flex gap-3 overflow-x-auto pb-2">
             {slate.games.map((game) => {
-              const active = game.id === gameFilter;
+              const active = selectedGameIds.includes(game.id);
+              const count = playersPerGame.get(game.id) ?? 0;
               return (
                 <button
                   key={game.id}
-                  onClick={() => resetPaging(setGameFilter)(active ? null : game.id)}
-                  className={`min-w-[150px] shrink-0 rounded-2xl border p-3 text-left transition ${
+                  onClick={() => toggleGame(game.id)}
+                  disabled={count === 0 && !active}
+                  aria-pressed={active}
+                  title={count === 0 ? "No players from this game in the pool (not on this DraftKings slate)" : undefined}
+                  className={`min-w-[150px] shrink-0 rounded-2xl border p-3 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${
                     active ? "border-emerald-400 bg-emerald-500/10" : "border-slate-800 bg-slate-900/60 hover:border-slate-600"
                   }`}
                 >
-                  <p className="font-bold">
-                    {game.awayTeam} <span className="text-slate-500">@</span> {game.homeTeam}
+                  <p className="flex items-center justify-between gap-2 font-bold">
+                    <span>
+                      {game.awayTeam} <span className="text-slate-500">@</span> {game.homeTeam}
+                    </span>
+                    <span
+                      aria-hidden
+                      className={`flex h-4 w-4 items-center justify-center rounded border text-[10px] ${
+                        active ? "border-emerald-400 bg-emerald-400 text-slate-950" : "border-slate-600"
+                      }`}
+                    >
+                      {active ? "✓" : ""}
+                    </span>
                   </p>
                   <p className="mt-1 text-xs text-emerald-300">{game.status === "Final" ? "Final" : formatKickoff(game.kickoff)}</p>
                   <p className="mt-1 text-xs text-slate-400">{formatLine(game) || game.channel || " "}</p>
+                  <p className="mt-1 text-[11px] text-slate-500">{count} players</p>
                 </button>
               );
             })}
