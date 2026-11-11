@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import AccuracyTab from "@/app/components/accuracy-tab";
 import GamesTab from "@/app/components/games-tab";
 import LineupTab from "@/app/components/lineup-tab";
 import ResearchTab from "@/app/components/research-tab";
@@ -15,6 +16,7 @@ const TABS = [
   { id: "lineup", label: "Lineup builder" },
   { id: "research", label: "Projections" },
   { id: "games", label: "Games & weather" },
+  { id: "accuracy", label: "Accuracy" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -238,7 +240,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
           ))}
         </nav>
 
-        {tab !== "games" && (
+        {(tab === "lineup" || tab === "research") && (
           <div className="mb-6 flex flex-wrap items-center gap-2" role="group" aria-label="DraftKings slate">
             <span className="mr-1 text-xs uppercase tracking-[0.2em] text-slate-500">DK slate</span>
             {SLATE_OPTIONS.map((o) => {
@@ -275,7 +277,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
           </div>
         )}
 
-        {(starters.length > 0 || recalcError) && tab !== "games" && (
+        {(starters.length > 0 || recalcError) && (tab === "lineup" || tab === "research") && (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-sky-500/30 bg-sky-500/5 px-4 py-2 text-sm text-sky-200">
             <span className="font-semibold">Marked starting:</span>
             {starters.map((o) => (
@@ -302,6 +304,9 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
         </div>
         <div role="tabpanel" id="panel-games" aria-labelledby="tab-games" hidden={tab !== "games"}>
           <GamesTab slate={slate} />
+        </div>
+        <div role="tabpanel" id="panel-accuracy" aria-labelledby="tab-accuracy" hidden={tab !== "accuracy"}>
+          <AccuracyTab active={tab === "accuracy"} />
         </div>
       </div>
     </main>
