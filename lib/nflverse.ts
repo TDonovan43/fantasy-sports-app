@@ -1,7 +1,7 @@
 import { parseCsvObjects } from "@/lib/csv";
 import { isInactive, normalizeName } from "@/lib/dk-salaries";
 import type { DepthInfo } from "@/lib/sleeper";
-import { round1, round2 } from "@/lib/sportsdataio";
+import { round1, round2 } from "@/lib/model-utils";
 import type { Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, StarterOverride, TeamProfile } from "@/lib/types";
 
 /**
