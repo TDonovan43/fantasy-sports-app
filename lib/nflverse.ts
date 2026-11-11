@@ -933,3 +933,58 @@ export function actualWeekPoints(data: NflverseData, season: number, week: numbe
   }
   return out;
 }
+
+/**
+ * Actual DST points per team for a played week, keyed like projections (`nfl-dst-TEAM`). Uses the
+ * same DraftKings defense scoring as the model, with points allowed from the final score.
+ */
+export function actualWeekDstPoints(data: NflverseData, season: number, week: number) {
+  const byTeam = new Map<string, { gameId: string; pts: number }>();
+  for (const r of data.stats.get(season) ?? []) {
+    if (n(r.week) !== week || r.season_type !== "REG") continue;
+    const team = teamAbbr(r.team);
+    const entry = byTeam.get(team) ?? { gameId: r.game_id, pts: 0 };
+    entry.pts +=
+      n(r.def_sacks) +
+      n(r.def_interceptions) * 2 +
+      n(r.fumble_recovery_opp) * 2 +
+      n(r.def_safeties) * 2 +
+      (n(r.def_fg_blocks) + n(r.def_punt_blocks) + n(r.def_pat_blocks)) * 2 +
+      (n(r.def_tds) + n(r.special_teams_tds)) * 6;
+    byTeam.set(team, entry);
+  }
+  const games = new Map(parseSchedule(data.schedule).map((g) => [g.gameId, g]));
+  const out = new Map<string, number>();
+  for (const [team, { gameId, pts }] of byTeam) {
+    const g = games.get(gameId);
+    if (!g || g.homeScore === null || g.awayScore === null) continue;
+    const allowed = g.home === team ? g.awayScore : g.homeScore;
+    out.set(`nfl-dst-${team}`, pts + pointsAllowedScore(allowed));
+  }
+  return out;
+}
+
+/** Each player's average DK points over this season's games before `week` (offense only). */
+export function seasonAverageBefore(data: NflverseData, season: number, week: number) {
+  const sums = new Map<string, { total: number; games: number }>();
+  for (const r of data.stats.get(season) ?? []) {
+    const w = n(r.week);
+    if (w >= week || r.season_type !== "REG" || !toOffensePosition(r.position)) continue;
+    const key = `nfl-${r.player_id}`;
+    const entry = sums.get(key) ?? { total: 0, games: 0 };
+    entry.total += dkOffensePoints(r);
+    entry.games++;
+    sums.set(key, entry);
+  }
+  return new Map([...sums].map(([k, v]) => [k, v.total / v.games]));
+}
+
+/** Regular-season weeks of `season` whose games are all final. */
+export function completedWeeks(data: NflverseData, season: number) {
+  const weeks = new Map<number, boolean>();
+  for (const g of parseSchedule(data.schedule)) {
+    if (g.season !== season) continue;
+    weeks.set(g.week, (weeks.get(g.week) ?? true) && g.homeScore !== null);
+  }
+  return [...weeks].filter(([, done]) => done).map(([w]) => w).sort((a, b) => a - b);
+}
