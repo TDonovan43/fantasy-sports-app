@@ -1,3 +1,4 @@
+import { easternToUtcMs } from "@/lib/time";
 import type { GameWeather } from "@/lib/types";
 
 /**
@@ -101,7 +102,7 @@ async function fetchWeather(requests: WeatherRequest[]): Promise<Map<string, Wea
     if (!stadium || roof === "dome" || !r.kickoff) continue;
 
     // Kickoff is Eastern wall-clock; only forecast games in the forecast window that haven't started.
-    const kickoffMs = Date.parse(`${r.kickoff}-05:00`);
+    const kickoffMs = easternToUtcMs(r.kickoff) ?? NaN;
     if (!(kickoffMs > now - 4 * 3600_000 && kickoffMs < now + FORECAST_DAYS * 86400_000)) continue;
     lookups.push({ gameId: r.gameId, stadium, date: r.kickoff.slice(0, 10), hour: r.kickoff.slice(0, 13) + ":00" });
   }
