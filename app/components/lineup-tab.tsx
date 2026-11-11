@@ -14,13 +14,14 @@ import {
   optimizeLineup,
 } from "@/lib/optimizer";
 import type { StarterControls } from "@/lib/starters";
-import type { PoolPlayer, SlateData } from "@/lib/types";
+import type { PoolPlayer, Position, SlateData } from "@/lib/types";
 
 type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value";
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
 const PAGE_SIZE = 50;
+const TOP_VALUE_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
 
 export function StartButton({ marked, pending, onClick }: { marked: boolean; pending: boolean; onClick: () => void }) {
   return (
@@ -79,6 +80,17 @@ export default function LineupTab({
   const remaining = slate.salaryCap - salaryUsed;
   const openSlots = slots.filter((s) => s === null).length;
   const hasDst = slate.players.some((p) => p.position === "DST");
+
+  /** Best points-per-$1K player at each position among those the optimizer could use. */
+  const topValue = useMemo(() => {
+    const best = new Map<Position, PoolPlayer>();
+    for (const p of slate.players) {
+      if (p.salary <= 0 || p.projected <= 0 || isInactive(p.injury) || excludedIds.includes(p.id)) continue;
+      const cur = best.get(p.position);
+      if (!cur || p.value > cur.value || (p.value === cur.value && p.projected > cur.projected)) best.set(p.position, p);
+    }
+    return best;
+  }, [slate.players, excludedIds]);
 
   const selectedGame = slate.games.find((g) => g.id === gameFilter) ?? null;
 
@@ -205,6 +217,51 @@ export default function LineupTab({
           </div>
         </section>
       )}
+
+      <section aria-label="Top value by position" className="mb-6">
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <h2 className="text-sm uppercase tracking-[0.22em] text-slate-400">Top value by position</h2>
+          <span className="text-xs text-slate-500">Projected points per $1,000 of salary</span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          {TOP_VALUE_POSITIONS.map((pos) => {
+            const p = topValue.get(pos);
+            const inLineup = !!p && lineupIds.includes(p.id);
+            return (
+              <div key={pos} className="flex min-w-0 flex-col rounded-2xl border border-slate-800 bg-slate-900/60 p-3">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">{pos}</p>
+                {p ? (
+                  <>
+                    <p className="mt-1 truncate font-bold text-white" title={p.name}>
+                      {p.name}
+                    </p>
+                    <p className="truncate text-xs text-slate-500">
+                      {p.team}
+                      {p.opponent ? ` vs ${p.opponent}` : ""} · {money(p.salary)}
+                      {p.injury && <span className="ml-1 font-semibold text-amber-300">{p.injury}</span>}
+                    </p>
+                    <p className="mt-2 flex items-baseline justify-between gap-2">
+                      <span className="text-xl font-black text-amber-300">{p.value.toFixed(2)}x</span>
+                      <span className="text-xs text-emerald-300">{p.projected.toFixed(1)} pts</span>
+                    </p>
+                    <button
+                      onClick={() => (inLineup ? removePlayer(p.id) : addPlayer(p))}
+                      aria-label={inLineup ? `Remove ${p.name}` : `Add ${p.name}`}
+                      className={`mt-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                        inLineup ? "bg-emerald-400 text-slate-950" : "border border-slate-600 text-slate-300 hover:border-emerald-400 hover:text-emerald-300"
+                      }`}
+                    >
+                      {inLineup ? "In lineup ✓" : "Add"}
+                    </button>
+                  </>
+                ) : (
+                  <p className="mt-1 text-sm text-slate-500">No eligible players</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
         <section className="min-w-0 overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/70">
