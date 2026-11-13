@@ -92,6 +92,8 @@ export default function LineupTab({
   const [built, setBuilt] = useState<MultiLineupResult | null>(null);
   const [stackRules, setStackRules] = useState<StackRules>(DEFAULT_STACK_RULES);
   const [maxStackExposurePct, setMaxStackExposurePct] = useState(40);
+  /** Share of built lineups with 2 TEs (a TE in the FLEX); null = the optimizer decides. */
+  const [twoTeShare, setTwoTeShare] = useState<number | null>(null);
   const [busy, setBusy] = useState<null | "optimize" | "build">(null);
 
   /** Projected players plus (optionally) unprojected ones, which can only be added by hand. */
@@ -306,7 +308,7 @@ export default function LineupTab({
     let result: MultiLineupResult;
     let note = "";
     try {
-      const r = await callSolver({ ...settings, maxStackExposure: Math.min(100, Math.max(5, maxStackExposurePct)) / 100 });
+      const r = await callSolver({ ...settings, maxStackExposure: Math.min(100, Math.max(5, maxStackExposurePct)) / 100, twoTeShare });
       result = {
         lineups: r.lineups.map((l) => ({ players: toPlayers(l.ids), salary: l.salary, projected: l.projected })),
         exposure: new Map(Object.entries(r.exposure)),
@@ -805,6 +807,18 @@ export default function LineupTab({
                   None vs my DST
                 </label>
               </div>
+              <label className="col-span-2 flex flex-col gap-1 text-slate-400" title="Play a second TE in the FLEX: cheap, and often strong in tournaments">
+                TE in FLEX
+                <select
+                  value={stackRules.teCount ?? "auto"}
+                  onChange={(e) => setRule("teCount", e.target.value === "auto" ? null : (Number(e.target.value) as 1 | 2))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value="auto">Optimizer decides</option>
+                  <option value={2}>Always (2 TEs)</option>
+                  <option value={1}>Never (1 TE)</option>
+                </select>
+              </label>
             </div>
             {stacking && stackTeamOptions.length > 0 && (
               <div className="mt-3">
@@ -884,6 +898,22 @@ export default function LineupTab({
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
+                </select>
+              </label>
+              <label className="col-span-2 flex flex-col gap-1 text-slate-400" title="Exactly this share of lineups use 2 TEs (one in the FLEX); the rest use 1">
+                2-TE lineups
+                <select
+                  value={twoTeShare === null ? "auto" : String(twoTeShare)}
+                  onChange={(e) => setTwoTeShare(e.target.value === "auto" ? null : Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value="auto">Optimizer decides{stackRules.teCount ? ` (TE in FLEX: ${stackRules.teCount === 2 ? "always" : "never"})` : ""}</option>
+                  {[0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1].map((v) => (
+                    <option key={v} value={String(v)}>
+                      {Math.round(v * 100)}% of lineups
+                      {v > 0 && v < 1 ? ` (${Math.round(v * Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount) || 1)))} of ${Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount) || 1))})` : ""}
+                    </option>
+                  ))}
                 </select>
               </label>
               {stacking && (
@@ -969,7 +999,8 @@ function BuiltLineups({
         <div className="mr-auto">
           <h2 className="text-2xl font-bold">Built lineups ({lineups.length})</h2>
           <p className="text-xs text-slate-500">
-            Best {ranked[0].l.projected.toFixed(1)} · average {avg.toFixed(1)} · lowest {ranked.at(-1)!.l.projected.toFixed(1)} projected points
+            Best {ranked[0].l.projected.toFixed(1)} · average {avg.toFixed(1)} · lowest {ranked.at(-1)!.l.projected.toFixed(1)} projected points ·{" "}
+            {lineups.filter((l) => l.players.filter((p) => p.position === "TE").length === 2).length} with 2 TEs
           </p>
         </div>
         <button onClick={onExport} className="rounded-full bg-emerald-400 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-emerald-300">
@@ -1023,7 +1054,14 @@ function BuiltLineups({
                   {showOwnership && <span className="ml-2 text-xs text-slate-500">Own {totalOwnership(l.players).toFixed(0)}%</span>}
                 </p>
               </div>
-              {stack && <p className="mb-2 text-xs text-sky-300">{stack.label}</p>}
+              {(stack || l.players.filter((p) => p.position === "TE").length === 2) && (
+                <p className="mb-2 text-xs text-sky-300">
+                  {stack?.label}
+                  {l.players.filter((p) => p.position === "TE").length === 2 && (
+                    <span className="ml-2 rounded-full border border-sky-400/40 px-1.5 text-[10px]">2 TE</span>
+                  )}
+                </p>
+              )}
               <ol className="space-y-0.5 text-sm">
                 {ROSTER_SLOTS.map((slot, i) => {
                   const p = slots[i];
