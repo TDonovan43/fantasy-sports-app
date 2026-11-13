@@ -30,6 +30,8 @@ export type PoolPlayer = {
   research?: PlayerResearch;
   /** Establish The Run numbers from a browser upload (ownership in %, 0–100). */
   etr?: { projected: number; floor: number | null; ceiling: number | null; ownSmall: number | null; ownLarge: number | null };
+  /** Estimated weather effect at kickoff, for awareness only (not applied to projections). */
+  weatherImpact?: { pct: number; label: string; detail: string };
   /** FieldGoal's own numbers, kept when the projection source is ETR or Blend. */
   fieldgoal?: { projected: number; floor: number; ceiling: number };
 };

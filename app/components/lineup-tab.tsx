@@ -554,6 +554,9 @@ export default function LineupTab({
                   <th className="px-3 py-3" />
                   {sortHeader("name", "Player")}
                   <th className="px-3 py-3 uppercase tracking-[0.18em]">Matchup</th>
+                  <th className="px-3 py-3 uppercase tracking-[0.18em]" title="Estimated weather effect at kickoff (2023–26 results). For awareness only: not applied to projections.">
+                    Weather
+                  </th>
                   {sortHeader("salary", "Salary")}
                   {sortHeader("projected", "Proj")}
                   {hasEtr && sortHeader("etr", "ETR")}
@@ -603,6 +606,14 @@ export default function LineupTab({
                         </p>
                       </td>
                       <td className="px-3 py-2 text-slate-400">{p.opponent ? `vs ${p.opponent}` : "—"}</td>
+                      <td
+                        className={`whitespace-nowrap px-3 py-2 text-xs ${
+                          (p.weatherImpact?.pct ?? 0) < 0 ? "text-rose-300" : (p.weatherImpact?.pct ?? 0) > 0 ? "text-emerald-300" : "text-slate-500"
+                        }`}
+                        title={p.weatherImpact?.detail}
+                      >
+                        {p.weatherImpact?.label ?? "—"}
+                      </td>
                       <td className="px-3 py-2">{money(p.salary)}</td>
                       <td className="px-3 py-2 font-bold text-emerald-300">
                         {p.projected === 0 ? "—" : p.projected.toFixed(1)}
