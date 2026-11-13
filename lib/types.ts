@@ -28,6 +28,10 @@ export type PoolPlayer = {
   projectionFromDkAvg?: boolean;
   /** Inputs behind the projection (nflverse model only). */
   research?: PlayerResearch;
+  /** Establish The Run numbers from a browser upload (ownership in %, 0–100). */
+  etr?: { projected: number; floor: number | null; ceiling: number | null; ownSmall: number | null; ownLarge: number | null };
+  /** FieldGoal's own numbers, kept when the projection source is ETR or Blend. */
+  fieldgoal?: { projected: number; floor: number; ceiling: number };
 };
 
 /** The numbers that feed a player's projection, all per game unless noted. */

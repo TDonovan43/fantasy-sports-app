@@ -60,6 +60,16 @@ Inputs: weekly player stats for this season and last, the schedule (with closing
 
 The model only adjusts roles for QBs, so an RB or WR whose role changed recently is reflected only gradually. It doesn't know about late news such as depth-chart changes or weather, so check player status before lock.
 
+## Establish The Run projections (browser-only)
+
+**Upload ETR projections** in the header accepts ETR's DraftKings slate export (DK projection, floor, ceiling, small- and large-field projected ownership, DraftKings ids) or their weekly projections file (projection and ceiling). The file is parsed in your browser, saved there for the week, and never sent to the server, because ETR's content is paid and the site is public.
+
+- Players are matched by DraftKings id, then name and team, then name and position; defenses by team; "LA" is treated as "LAR".
+- **Projections** setting (under the tabs, once a file is loaded): **FieldGoal** (default), **ETR**, or **Blend** with an ETR weight slider. It sets the projection, floor and ceiling used by the player pool, Top value, Optimize and Build multiple lineups.
+- The Lineup builder adds **ETR** and **Own** columns, ownership on the Top value cards, and total lineup ownership. The Projections tab adds FG, ETR, Diff (ETR − FG), ETR ceiling and both ownership numbers.
+- ETR's slate export lists every player on the slate, so players it leaves out (tagged "not in ETR") are usually not expected to play. They're dropped in ETR mode and kept with FieldGoal's projection in Blend mode. Players only ETR projects ("ETR only") join the pool in ETR and Blend modes.
+- Because uploads stay in the browser, ETR projections aren't recorded for the Accuracy tab.
+
 ## DraftKings salaries
 
 Salaries come from DraftKings' own file. On DraftKings, open any **Classic** contest for the slate and choose **Export to CSV** (`DKSalaries.csv`). Then do one of the following:
