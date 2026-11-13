@@ -2,7 +2,7 @@ import { parseCsvObjects } from "@/lib/csv";
 import { isInactive, normalizeName } from "@/lib/dk-salaries";
 import type { DepthInfo } from "@/lib/sleeper";
 import { round1, round2 } from "@/lib/model-utils";
-import type { Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, StarterOverride, TeamProfile } from "@/lib/types";
+import type { GameLogEntry, Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, StarterOverride, TeamProfile } from "@/lib/types";
 
 /**
  * FieldGoal projection model built on nflverse data (https://github.com/nflverse/nflverse-data).
@@ -148,7 +148,15 @@ type PlayerGame = {
   recYds: number;
   targets: number;
   receptions: number;
+  ints: number;
+  rushTds: number;
+  recTds: number;
+  /** From the game id (AWAY_HOME); null when it can't be read. */
+  home: boolean | null;
 };
+
+/** Games shown in a player's hover log. */
+const GAME_LOG_SIZE = 5;
 
 /** Backup QBs keep this share of their projection (garbage time, trick plays). */
 const BACKUP_QB_FACTOR = 0.1;
@@ -172,6 +180,7 @@ type TeamGame = {
   rushYds: number;
   sacks: number;
   takeaways: number;
+  home: boolean;
 };
 
 type ScheduleGame = {
@@ -400,6 +409,38 @@ function toPlayerGame(r: Row, season: number, week: number, team: string, oppone
     recYds: n(r.receiving_yards),
     targets: n(r.targets),
     receptions: n(r.receptions),
+    ints: n(r.passing_interceptions),
+    rushTds: n(r.rushing_tds),
+    recTds: n(r.receiving_tds),
+    home: homeFromGameId(r.game_id, r.team),
+  };
+}
+
+/** nflverse game ids read SEASON_WEEK_AWAY_HOME (raw abbreviations, e.g. "LA"). */
+function homeFromGameId(gameId: string, rawTeam: string): boolean | null {
+  const parts = gameId.split("_");
+  if (parts.length < 4) return null;
+  return parts[3] === rawTeam ? true : parts[2] === rawTeam ? false : null;
+}
+
+function playerLogEntry(g: PlayerGame): GameLogEntry {
+  const entry: GameLogEntry = { season: g.season, week: g.week, opponent: g.opponent, home: g.home, points: Math.round(g.points * 10) / 10 };
+  if (g.position === "QB") return { ...entry, passAtt: g.attempts, passYds: g.passYds, passTds: g.passTds, ints: g.ints, rushYds: g.rushYds };
+  if (g.position === "RB")
+    return { ...entry, rushAtt: g.rushAtt, rushYds: g.rushYds, targets: g.targets, receptions: g.receptions, recYds: g.recYds, tds: g.rushTds + g.recTds };
+  return { ...entry, targets: g.targets, receptions: g.receptions, recYds: g.recYds, tds: g.rushTds + g.recTds };
+}
+
+function dstLogEntry(t: TeamGame): GameLogEntry {
+  return {
+    season: t.season,
+    week: t.week,
+    opponent: t.opponent,
+    home: t.home,
+    points: Math.round(t.dstPoints * 10) / 10,
+    sacks: t.sacks,
+    takeaways: t.takeaways,
+    pointsAllowed: t.pointsAllowed,
   };
 }
 
@@ -489,6 +530,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
       rushYds: d.rushYds,
       sacks: d.sacks,
       takeaways: d.takeaways,
+      home: isHome,
     });
   }
 
@@ -617,6 +659,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
     sumW: number;
     games: number;
     current: PlayerGame[];
+    recent: PlayerGame[];
   };
   const candidates: Candidate[] = [];
 
@@ -649,6 +692,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
       sumW,
       games: kept.length,
       current: kept.filter((g) => g.season === season),
+      recent: games.slice(0, GAME_LOG_SIZE),
     });
   }
 
@@ -687,6 +731,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
     const status = statusFor(c.id, c.name, c.team, c.position);
     const avg = (pick: (g: PlayerGame) => number) => round1(perGame(c.current, pick));
     const research: PlayerResearch = {
+      gameLog: c.recent.map(playerLogEntry),
       games: c.current.length,
       seasonAvg: avg((g) => g.points),
       last3Avg: round1(perGame(c.current.slice(0, 3), (g) => g.points)),
@@ -830,6 +875,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
           : { recYds: avg((g) => g.recYds), targets: avg((g) => g.targets), receptions: avg((g) => g.receptions) }),
         rushYds: avg((g) => g.rushYds),
         rushAtt: avg((g) => g.rushAtt),
+        gameLog: history.slice(0, GAME_LOG_SIZE).map(playerLogEntry),
         limitedData: { source: d.source, historyGames: count, historyAvg: count ? round1(hist.mean) : null, roleBaseline: round1(role) },
         manualStarter: d.source === "manual",
       },
@@ -866,6 +912,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
         vegasFactor: vegas === null ? null : round2(vegas),
         impliedTotal: oppImplied === null ? null : round1(oppImplied),
         roleFactor: 1,
+        gameLog: games.slice(0, GAME_LOG_SIZE).map(dstLogEntry),
         sacks: round1(perGame(current, (g) => g.sacks)),
         takeaways: round1(perGame(current, (g) => g.takeaways)),
         pointsAllowed: round1(perGame(current, (g) => g.pointsAllowed)),

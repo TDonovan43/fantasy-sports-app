@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { HoverCards, useHoverCards } from "@/app/components/hover-cards";
 import { isInactive } from "@/lib/dk-salaries";
 import { formatKickoff, formatLine, impliedTotals, money, opponentLabel } from "@/lib/format";
 import { DEFAULT_STACK_RULES, NO_RULES, describeStack, type StackRules } from "@/lib/stack-rules";
@@ -95,6 +96,7 @@ export default function LineupTab({
   /** Share of built lineups with 2 TEs (a TE in the FLEX); null = the optimizer decides. */
   const [twoTeShare, setTwoTeShare] = useState<number | null>(null);
   const [busy, setBusy] = useState<null | "optimize" | "build">(null);
+  const { hover, bind } = useHoverCards();
 
   /** Projected players plus (optionally) unprojected ones, which can only be added by hand. */
   const pool = useMemo(
@@ -588,7 +590,12 @@ export default function LineupTab({
                         </button>
                       </td>
                       <td className="px-3 py-2">
-                        <p className="font-semibold text-white">{p.name}</p>
+                        <button
+                          className="text-left font-semibold text-white underline decoration-slate-600 decoration-dotted underline-offset-4"
+                          {...bind("log", p)}
+                        >
+                          {p.name}
+                        </button>
                         <p className="text-xs text-slate-500">
                           {p.position} · {p.team}
                           {p.injury && (
@@ -607,7 +614,15 @@ export default function LineupTab({
                           )}
                         </p>
                       </td>
-                      <td className="px-3 py-2 text-slate-400">{opponentLabel(p)}</td>
+                      <td className="px-3 py-2 text-slate-400">
+                        {p.opponent ? (
+                          <button className="underline decoration-slate-600 decoration-dotted underline-offset-4 hover:text-white" {...bind("opponent", p)}>
+                            {opponentLabel(p)}
+                          </button>
+                        ) : (
+                          opponentLabel(p)
+                        )}
+                      </td>
                       <td
                         className={`whitespace-nowrap px-3 py-2 text-xs ${
                           (p.weatherImpact?.pct ?? 0) < 0 ? "text-rose-300" : (p.weatherImpact?.pct ?? 0) > 0 ? "text-emerald-300" : "text-slate-500"
@@ -968,6 +983,7 @@ export default function LineupTab({
           onClear={() => setBuilt(null)}
         />
       )}
+      <HoverCards hover={hover} teams={slate.teams} />
     </>
   );
 }

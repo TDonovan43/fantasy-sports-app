@@ -83,6 +83,33 @@ export type PlayerResearch = {
   };
   /** True when this player is the team's starter only because of a manual override. */
   manualStarter?: boolean;
+  /** Most recent games, newest first (last season's fill in when this season has few). */
+  gameLog?: GameLogEntry[];
+};
+
+/** One game in a player's (or defense's) recent log. Only the stats for his position are filled. */
+export type GameLogEntry = {
+  season: number;
+  week: number;
+  opponent: string;
+  /** null when unknown. */
+  home: boolean | null;
+  /** DraftKings points. */
+  points: number;
+  passAtt?: number;
+  passYds?: number;
+  passTds?: number;
+  ints?: number;
+  rushAtt?: number;
+  rushYds?: number;
+  targets?: number;
+  receptions?: number;
+  recYds?: number;
+  /** Rushing + receiving TDs. */
+  tds?: number;
+  sacks?: number;
+  takeaways?: number;
+  pointsAllowed?: number;
 };
 
 /** A player the user marked as starting (browser-only override). */
