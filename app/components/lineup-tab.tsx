@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { HoverCards, useHoverCards } from "@/app/components/hover-cards";
 import { isInactive } from "@/lib/dk-salaries";
+import { OWNERSHIP_TARGET, isOwnershipMode, type OwnershipMode } from "@/lib/ownership-weighting";
 import { formatKickoff, formatLine, impliedTotals, money, opponentLabel } from "@/lib/format";
 import { DEFAULT_STACK_RULES, NO_RULES, describeStack, type StackRules } from "@/lib/stack-rules";
 import {
@@ -92,11 +93,12 @@ export default function LineupTab({
   const [minUnique, setMinUnique] = useState(2);
   const [maxExposurePct, setMaxExposurePct] = useState(60);
   const [randomness, setRandomness] = useState<Randomness>("medium");
-  const [built, setBuilt] = useState<MultiLineupResult | null>(null);
+  const [built, setBuilt] = useState<(MultiLineupResult & { ownershipMode: OwnershipMode | null }) | null>(null);
   const [stackRules, setStackRules] = useState<StackRules>(DEFAULT_STACK_RULES);
   const [maxStackExposurePct, setMaxStackExposurePct] = useState(40);
   /** Share of built lineups with 2 TEs (a TE in the FLEX); null = the optimizer decides. */
   const [twoTeShare, setTwoTeShare] = useState<number | null>(null);
+  const [ownershipMode, setOwnershipMode] = useState<OwnershipMode | null>(null);
   const [busy, setBusy] = useState<null | "optimize" | "build">(null);
   const { hover, bind } = useHoverCards();
 
@@ -327,6 +329,14 @@ export default function LineupTab({
       randomness: RANDOMNESS[randomness],
       // A new seed each click, so "Build" again gives a different set.
       seed: Math.floor(Math.random() * 2 ** 31),
+      ...(ownershipMode && hasOwnership
+        ? {
+            ownershipMode,
+            ownership: Object.fromEntries(
+              optimizerPool().flatMap((p) => (typeof p.etr?.ownLarge === "number" ? [[p.id, p.etr.ownLarge / 100]] : [])),
+            ) as Record<string, number>,
+          }
+        : {}),
     };
     setBusy("build");
     setMessage(`Building ${count} lineups…`);
@@ -352,7 +362,7 @@ export default function LineupTab({
     } finally {
       setBusy(null);
     }
-    setBuilt(result);
+    setBuilt({ ...result, ownershipMode: settings.ownershipMode ?? null });
     setMessage(
       result.lineups.length
         ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lockIds.length ? ` around your ${lockIds.length} locked player${lockIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.${note}`
@@ -979,6 +989,24 @@ export default function LineupTab({
                   <option value="high">High</option>
                 </select>
               </label>
+              {hasOwnership && (
+                <label
+                  className="col-span-2 flex flex-col gap-1 text-slate-400"
+                  title="Your exposure to each chalk player (ETR projected 10%+ owned, large field) compared with the field. Lower-owned players are left to the optimizer, and Max exposure % still applies."
+                >
+                  Ownership vs. field
+                  <select
+                    value={ownershipMode ?? "ignore"}
+                    onChange={(e) => setOwnershipMode(isOwnershipMode(e.target.value) ? e.target.value : null)}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                  >
+                    <option value="ignore">Ignore ownership</option>
+                    <option value="under">Underweight chalk: at most ½ projected own</option>
+                    <option value="match">In line: about projected own</option>
+                    <option value="over">Overweight chalk: up to 1.5× projected own</option>
+                  </select>
+                </label>
+              )}
               <label className="col-span-2 flex flex-col gap-1 text-slate-400" title="Exactly this share of lineups use 2 TEs (one in the FLEX); the rest use 1">
                 2-TE lineups
                 <select
@@ -1028,6 +1056,7 @@ export default function LineupTab({
           opponentOf={opponentOf}
           rules={stackRules}
           showOwnership={hasOwnership}
+          ownershipMode={hasOwnership ? built.ownershipMode : null}
           onLoad={(ids) => {
             setEditor(ids, lockIds);
             setMessage("Loaded into the editor.");
@@ -1056,6 +1085,7 @@ function BuiltLineups({
   opponentOf,
   rules,
   showOwnership,
+  ownershipMode,
   onLoad,
   onExport,
   onClear,
@@ -1065,6 +1095,7 @@ function BuiltLineups({
   opponentOf: Map<string, string>;
   rules: StackRules;
   showOwnership: boolean;
+  ownershipMode: OwnershipMode | null;
   onLoad: (ids: string[]) => void;
   onExport: () => void;
   onClear: () => void;
@@ -1117,15 +1148,36 @@ function BuiltLineups({
       )}
 
       <div className="mt-4">
-        <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Exposure: share of lineups each player is in</p>
-        <div className="flex flex-wrap gap-2">
-          {mostUsed.map(({ p, pct }) => (
-            <span key={p.id} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs">
-              <span className="font-semibold text-white">{p.name}</span>
-              <span className="ml-1 text-slate-500">{p.position}</span>
-              <span className="ml-2 text-amber-300">{pct}%</span>
+        <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+          Exposure: share of lineups each player is in
+          {showOwnership && <span className="normal-case tracking-normal"> · vs. projected ownership (▲ over, ▼ under the field)</span>}
+          {ownershipMode && (
+            <span className="normal-case tracking-normal text-sky-300">
+              {" "}
+              · built {ownershipMode === "under" ? "underweight" : ownershipMode === "over" ? "overweight" : "in line"} (chalk target {OWNERSHIP_TARGET[ownershipMode]}× own)
             </span>
-          ))}
+          )}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {mostUsed.map(({ p, pct }) => {
+            const own = showOwnership ? p.etr?.ownLarge : null;
+            const diff = typeof own === "number" ? pct - own : null;
+            return (
+              <span key={p.id} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs">
+                <span className="font-semibold text-white">{p.name}</span>
+                <span className="ml-1 text-slate-500">{p.position}</span>
+                <span className="ml-2 text-amber-300">{pct}%</span>
+                {typeof own === "number" && diff !== null && (
+                  <span
+                    title={`Projected ownership ${own.toFixed(1)}%`}
+                    className={`ml-1 ${diff > 5 ? "text-amber-200" : diff < -5 ? "text-sky-300" : "text-slate-500"}`}
+                  >
+                    {diff > 5 ? "▲" : diff < -5 ? "▼" : "≈"} {own.toFixed(0)}%
+                  </span>
+                )}
+              </span>
+            );
+          })}
         </div>
       </div>
 

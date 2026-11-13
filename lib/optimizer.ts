@@ -1,4 +1,5 @@
 import { isInactive } from "@/lib/dk-salaries";
+import { ownershipPlan, type OwnershipMode } from "@/lib/ownership-weighting";
 import type { PoolPlayer, Position } from "@/lib/types";
 
 /** DraftKings NFL Classic roster. */
@@ -237,6 +238,9 @@ export type MultiLineupOptions = OptimizeOptions & {
   seed?: number;
   /** Maps a player to his game, to enforce DraftKings' 2-game rule. */
   gameOf?: (p: PoolPlayer) => string;
+  /** Projected ownership (0–1) by player id, and how to weight lineups against it. */
+  ownership?: Record<string, number>;
+  ownershipMode?: OwnershipMode | null;
 };
 
 export type BuiltLineup = { players: PoolPlayer[]; salary: number; projected: number };
@@ -281,6 +285,9 @@ export function generateLineups(options: MultiLineupOptions): MultiLineupResult 
   const random = seededRandom(options.seed ?? 1);
   const locked = new Set(lockedIds);
   const cap = Math.max(1, Math.floor(maxExposure * count + 1e-9));
+  const own = ownershipPlan(options.ownership, options.ownershipMode, count);
+  const capFor = (id: string) => Math.min(cap, own?.caps.get(id) ?? cap);
+  // Fallback only: ownership caps apply, minimums need the server solver.
   const exposure = new Map<string, number>();
   const lineups: BuiltLineup[] = [];
   const previous: Set<string>[] = [];
@@ -294,7 +301,7 @@ export function generateLineups(options: MultiLineupOptions): MultiLineupResult 
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS && !accepted; attempt++) {
       const scale = i === 0 && attempt === 0 ? 0 : randomness * (1 + attempt / 10);
-      const capped = [...exposure].filter(([id, n]) => n >= cap && !locked.has(id)).map(([id]) => id);
+      const capped = [...exposure].filter(([id, n]) => n >= capFor(id) && !locked.has(id)).map(([id]) => id);
       const nudged =
         scale === 0
           ? pool
