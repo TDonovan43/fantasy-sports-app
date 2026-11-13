@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { StartButton } from "@/app/components/lineup-tab";
-import { money, ordinal, pct } from "@/lib/format";
+import { money, opponentLabel, ordinal, pct } from "@/lib/format";
 import type { StarterControls } from "@/lib/starters";
 import type { OffensePosition, PlayerResearch, PoolPlayer, SlateData, TeamProfile } from "@/lib/types";
 
@@ -299,7 +299,7 @@ export default function ResearchTab({
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-slate-400">{p.opponent ?? "—"}</td>
+                  <td className="px-3 py-2 text-slate-400">{opponentLabel(p)}</td>
                   {columns.map((c) => {
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";

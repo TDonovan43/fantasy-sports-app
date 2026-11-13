@@ -8,7 +8,7 @@ import ResearchTab from "@/app/components/research-tab";
 import { applyDkSalariesToSlate, dkFileDates, parseDkSalariesCsv, salaryFileMatchesSlate, shortDate } from "@/lib/dk-salaries";
 import { applyProjectionSource, mergeEtr, parseEtrCsv, type ProjectionMode } from "@/lib/etr";
 import { withWeatherImpact } from "@/lib/weather-impact";
-import { SLATE_OPTIONS, filterSlate, gameInSlate, type SlateFilter } from "@/lib/slates";
+import { SLATE_OPTIONS, filterSlate, gameInSlate, markHomeAway, type SlateFilter } from "@/lib/slates";
 import { matchesOverride, toggleOverride, type StarterControls } from "@/lib/starters";
 import type { PoolPlayer, SlateData, StarterOverride } from "@/lib/types";
 
@@ -138,7 +138,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
 
   /** The slate with projections from the chosen source (FieldGoal, ETR or a blend). */
   const sourced = useMemo(
-    () => withWeatherImpact(etr ? applyProjectionSource(etr.slate, projectionMode, etrWeight / 100, etr.complete) : slate),
+    () => markHomeAway(withWeatherImpact(etr ? applyProjectionSource(etr.slate, projectionMode, etrWeight / 100, etr.complete) : slate)),
     [etr, slate, projectionMode, etrWeight],
   );
 

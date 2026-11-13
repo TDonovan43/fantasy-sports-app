@@ -1,6 +1,12 @@
 import type { Matchup } from "@/lib/types";
 
-export const money = (n: number) => (n > 0 ? `$${n.toLocaleString("en-US")}` : "—");
+export const money = (n: number) => (n > 0 ? `${n.toLocaleString("en-US")}` : "—");
+
+/** "vs DAL" at home, "@ DAL" on the road, "—" without an opponent. */
+export function opponentLabel(p: { opponent: string | null; isHome?: boolean }) {
+  if (!p.opponent) return "—";
+  return `${p.isHome === false ? "@" : "vs"} ${p.opponent}`;
+}
 
 /** Provider times are Eastern wall-clock; format the digits without shifting time zones. */
 export function formatKickoff(value: string | null | undefined) {
