@@ -27,6 +27,13 @@ const BASE_COLUMNS: Column[] = [
   { key: "base", label: "Base", title: "Projection before matchup, Vegas and role adjustments", value: (_, r) => r.baseProjection, format: fmt1 },
   { key: "weighted", label: "Wtd", title: "Recency-weighted DK points per game (incl. last season at reduced weight)", value: (_, r) => r.weightedAvg, format: fmt1 },
   { key: "season", label: "Szn", title: "DK points per game this season", value: (_, r) => r.seasonAvg, format: fmt1 },
+  {
+    key: "sd",
+    label: "SD",
+    title: "Standard deviation of DK points per game this season (3+ games). Amber = boom/bust for his position, blue = steady (vs. players averaging 8+, DSTs 4+). Hover a cell for details.",
+    value: (_, r) => r.stdDev,
+    format: fmt1,
+  },
   { key: "last3", label: "L3", title: "DK points per game, last 3 games", value: (_, r) => r.last3Avg, format: fmt1 },
   { key: "games", label: "G", title: "Games this season used by the model", value: (_, r) => r.games, format: (v) => String(v) },
 ];
@@ -103,6 +110,29 @@ const FACTOR_COLUMNS: Column[] = [
   },
 ];
 
+/** Players below this many DK points per game don't set the volatility cutoffs (their SD swamps a tiny average). */
+const cvMinAvg = (position: string) => (position === "DST" ? 4 : 8);
+
+/**
+ * Per position, the SD-to-average ratios that split the slate's regular contributors into thirds:
+ * at or above `volatile` = boom/bust (amber), at or below `steady` = consistent (blue).
+ */
+function volatilityCutoffs(players: PoolPlayer[]) {
+  const byPos = new Map<string, number[]>();
+  for (const p of players) {
+    const r = p.research;
+    if (r?.stdDev == null || r.seasonAvg < cvMinAvg(p.position)) continue;
+    byPos.set(p.position, [...(byPos.get(p.position) ?? []), r.stdDev / r.seasonAvg]);
+  }
+  const cutoffs = new Map<string, { steady: number; volatile: number }>();
+  for (const [pos, list] of byPos) {
+    if (list.length < 3) continue;
+    list.sort((a, b) => a - b);
+    cutoffs.set(pos, { steady: list[Math.floor(list.length / 3)], volatile: list[Math.ceil((list.length * 2) / 3) - 1] });
+  }
+  return cutoffs;
+}
+
 /** Stand-in research for unprojected players so the table can render them. */
 const EMPTY_RESEARCH: PlayerResearch = {
   games: 0,
@@ -133,6 +163,7 @@ export default function ResearchTab({
   const { hover, bind } = useHoverCards();
 
   const hasEtr = slate.players.some((p) => p.etr);
+  const cutoffs = useMemo(() => volatilityCutoffs(slate.players), [slate.players]);
   const columns = useMemo(() => {
     if (!hasEtr) return [...BASE_COLUMNS, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
     // Proj, then the FieldGoal vs ETR comparison, then the rest.
@@ -288,6 +319,22 @@ export default function ResearchTab({
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";
                     const tone = isFactor && typeof v === "number" ? (v > 1.02 ? "text-emerald-300" : v < 0.98 ? "text-rose-300" : "text-slate-400") : "";
+                    if (c.key === "sd" && !unprojected && typeof v === "number" && r.seasonAvg > 0) {
+                      // Relative to the average, so a 25-point QB and an 8-point WR compare fairly.
+                      const cv = v / r.seasonAvg;
+                      const cut = r.seasonAvg >= cvMinAvg(p.position) ? cutoffs.get(p.position) : undefined;
+                      const band = !cut ? null : cv >= cut.volatile ? "volatile" : cv <= cut.steady ? "steady" : "typical";
+                      const label = band === "volatile" ? `boom/bust for a ${p.position}` : band === "steady" ? `steady for a ${p.position}` : band ? `typical for a ${p.position}` : "average too low to rate";
+                      return (
+                        <td
+                          key={c.key}
+                          title={`±${fmt1(v)} on a ${fmt1(r.seasonAvg)} average (${Math.round(cv * 100)}%): ${label}`}
+                          className={`px-3 py-2 ${band === "volatile" ? "font-semibold text-amber-300" : band === "steady" ? "text-sky-300" : "text-slate-300"}`}
+                        >
+                          {fmt1(v)}
+                        </td>
+                      );
+                    }
                     if (c.key === "weather") {
                       const w = p.weatherImpact;
                       return (

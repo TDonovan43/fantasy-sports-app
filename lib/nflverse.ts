@@ -296,6 +296,14 @@ function perGame<T>(list: T[], pick: (item: T) => number) {
   return list.length ? list.reduce((sum, x) => sum + pick(x), 0) / list.length : 0;
 }
 
+/** Sample standard deviation of DK points per game; null under 3 games (too noisy). */
+const MIN_SD_GAMES = 3;
+function pointsStdDev<T>(list: T[], pick: (item: T) => number): number | null {
+  if (list.length < MIN_SD_GAMES) return null;
+  const mean = perGame(list, pick);
+  return Math.round(Math.sqrt(list.reduce((sum, x) => sum + (pick(x) - mean) ** 2, 0) / (list.length - 1)) * 10) / 10;
+}
+
 /** Ranks values descending: 1 = highest. */
 function rankDesc(values: Map<string, number>) {
   const sorted = [...values.entries()].sort((a, b) => b[1] - a[1]);
@@ -734,6 +742,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
       gameLog: c.recent.map(playerLogEntry),
       games: c.current.length,
       seasonAvg: avg((g) => g.points),
+      stdDev: pointsStdDev(c.current, (g) => g.points),
       last3Avg: round1(perGame(c.current.slice(0, 3), (g) => g.points)),
       weightedAvg: round1(c.mean),
       salaryPrior: salary > 0 && priorFn ? round1(prior) : null,
@@ -862,6 +871,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
       research: {
         games: current.length,
         seasonAvg: round1(perGame(current, (g) => g.points)),
+        stdDev: pointsStdDev(current, (g) => g.points),
         last3Avg: round1(perGame(current.slice(0, 3), (g) => g.points)),
         weightedAvg: round1(hist.mean),
         salaryPrior: null,
@@ -904,6 +914,7 @@ export function projectWeek(data: NflverseData, season: number, week: number, ct
       research: {
         games: current.length,
         seasonAvg: round1(perGame(current, (g) => g.dstPoints)),
+        stdDev: pointsStdDev(current, (g) => g.dstPoints),
         last3Avg: round1(perGame(current.slice(0, 3), (g) => g.dstPoints)),
         weightedAvg: round1(mean),
         salaryPrior: null,

@@ -44,6 +44,8 @@ export type PlayerResearch = {
   games: number;
   /** DK points per game, this season. */
   seasonAvg: number;
+  /** Standard deviation of DK points per game this season; null under 3 games. */
+  stdDev?: number | null;
   last3Avg: number;
   /** Recency-weighted DK points (includes last season at reduced weight). */
   weightedAvg: number;
