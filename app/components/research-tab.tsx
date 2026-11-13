@@ -2,13 +2,13 @@
 
 import { useMemo, useState } from "react";
 import { StartButton } from "@/app/components/lineup-tab";
-import { money, opponentLabel, ordinal, pct } from "@/lib/format";
+import { HoverCards, useHoverCards } from "@/app/components/hover-cards";
+import { money, opponentLabel, pct } from "@/lib/format";
 import type { StarterControls } from "@/lib/starters";
-import type { OffensePosition, PlayerResearch, PoolPlayer, SlateData, TeamProfile } from "@/lib/types";
+import type { PlayerResearch, PoolPlayer, SlateData } from "@/lib/types";
 
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "DST";
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "DST"];
-const OFFENSE: OffensePosition[] = ["QB", "RB", "WR", "TE"];
 const PAGE_SIZE = 60;
 
 type Column = {
@@ -103,16 +103,6 @@ const FACTOR_COLUMNS: Column[] = [
   },
 ];
 
-/** Green for a soft matchup, red for a tough one. `goodIsHigh`: rank 1 helps the player. */
-function rankTone(rank: number, count: number, goodIsHigh: boolean) {
-  const third = Math.ceil(count / 3);
-  const good = goodIsHigh ? rank <= third : rank > count - third;
-  const bad = goodIsHigh ? rank > count - third : rank <= third;
-  return good ? "text-emerald-300" : bad ? "text-rose-300" : "text-slate-300";
-}
-
-type Hover = { player: PoolPlayer; x: number; y: number };
-
 /** Stand-in research for unprojected players so the table can render them. */
 const EMPTY_RESEARCH: PlayerResearch = {
   games: 0,
@@ -140,10 +130,8 @@ export default function ResearchTab({
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<{ key: string; desc: boolean }>({ key: "projected", desc: true });
   const [visible, setVisible] = useState(PAGE_SIZE);
-  const [hover, setHover] = useState<Hover | null>(null);
+  const { hover, bind } = useHoverCards();
 
-  const teams = slate.teams ?? {};
-  const teamCount = Object.keys(teams).length;
   const hasEtr = slate.players.some((p) => p.etr);
   const columns = useMemo(() => {
     if (!hasEtr) return [...BASE_COLUMNS, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
@@ -183,17 +171,12 @@ export default function ResearchTab({
     setSort((s) => (s.key === key ? { key, desc: !s.desc } : { key, desc: key !== "name" }));
   }
 
-  function showCard(player: PoolPlayer, el: HTMLElement) {
-    const rect = el.getBoundingClientRect();
-    setHover({ player, x: rect.right + 12, y: rect.top });
-  }
-
   return (
     <section className="min-w-0 overflow-hidden rounded-3xl border border-slate-800 bg-slate-900/70">
       <div className="flex flex-wrap items-center gap-3 border-b border-slate-800 px-4 py-4">
         <div className="mr-auto">
           <h2 className="text-2xl font-bold">Projection inputs</h2>
-          <p className="text-xs text-slate-500">Per-game stats this season. Hover (or tap) a player to see the opposing unit.</p>
+          <p className="text-xs text-slate-500">Per-game stats this season. Hover (or tap) a player for his recent games, or the opponent for its ranks by position.</p>
         </div>
         <input
           type="search"
@@ -254,14 +237,7 @@ export default function ResearchTab({
               return (
                 <tr key={p.id} className="border-t border-slate-800 hover:bg-slate-800/50">
                   <td className="px-3 py-2">
-                    <button
-                      className="text-left"
-                      onMouseEnter={(e) => showCard(p, e.currentTarget)}
-                      onMouseLeave={() => setHover(null)}
-                      onFocus={(e) => showCard(p, e.currentTarget)}
-                      onBlur={() => setHover(null)}
-                      onClick={(e) => (hover?.player.id === p.id ? setHover(null) : showCard(p, e.currentTarget))}
-                    >
+                    <button className="text-left" {...bind("log", p)}>
                       <span className="font-semibold text-white underline decoration-slate-600 decoration-dotted underline-offset-4">{p.name}</span>
                       <span className="block text-xs text-slate-500">
                         {p.position} · {p.team}
@@ -299,7 +275,15 @@ export default function ResearchTab({
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-slate-400">{opponentLabel(p)}</td>
+                  <td className="px-3 py-2 text-slate-400">
+                    {p.opponent ? (
+                      <button className="underline decoration-slate-600 decoration-dotted underline-offset-4 hover:text-white" {...bind("opponent", p)}>
+                        {opponentLabel(p)}
+                      </button>
+                    ) : (
+                      opponentLabel(p)
+                    )}
+                  </td>
                   {columns.map((c) => {
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";
@@ -337,95 +321,7 @@ export default function ResearchTab({
         </button>
       )}
 
-      {hover && <OpponentCard hover={hover} teams={teams} teamCount={teamCount} />}
+      <HoverCards hover={hover} teams={slate.teams} />
     </section>
-  );
-}
-
-function OpponentCard({ hover, teams, teamCount }: { hover: Hover; teams: Record<string, TeamProfile>; teamCount: number }) {
-  const { player } = hover;
-  const opp = player.opponent ? teams[player.opponent] : undefined;
-  const width = 300;
-  const left = typeof window !== "undefined" ? Math.min(hover.x, window.innerWidth - width - 12) : hover.x;
-  const top = typeof window !== "undefined" ? Math.min(hover.y, window.innerHeight - 340) : hover.y;
-
-  return (
-    <div
-      role="tooltip"
-      className="pointer-events-none fixed z-50 rounded-2xl border border-slate-700 bg-slate-950/95 p-4 text-sm shadow-2xl"
-      style={{ left: Math.max(12, left), top: Math.max(12, top), width }}
-    >
-      {!opp ? (
-        <p className="text-slate-400">No season data for {player.opponent ?? "this opponent"} yet.</p>
-      ) : player.position === "DST" ? (
-        <>
-          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{player.name} vs</p>
-          <p className="mb-3 text-lg font-bold">
-            {opp.team} offense <span className="text-xs font-normal text-slate-500">{opp.games} games</span>
-          </p>
-          <StatRow label="Points / game" value={opp.offense.points} rank={opp.offense.ranks.points} count={teamCount} goodIsHigh={false} />
-          <StatRow label="Pass yds / game" value={opp.offense.passYds} rank={opp.offense.ranks.passYds} count={teamCount} goodIsHigh={false} />
-          <StatRow label="Rush yds / game" value={opp.offense.rushYds} rank={opp.offense.ranks.rushYds} count={teamCount} goodIsHigh={false} />
-          <StatRow
-            label="DK pts allowed to DSTs"
-            value={opp.offense.dstPointsAllowed}
-            rank={opp.offense.ranks.dstPointsAllowed}
-            count={teamCount}
-            goodIsHigh
-          />
-          <p className="mt-3 text-[11px] text-slate-500">Rank 1 = most in the league. Green = good for this defense.</p>
-        </>
-      ) : (
-        <>
-          <p className="text-xs uppercase tracking-[0.18em] text-slate-500">{player.name} vs</p>
-          <p className="mb-3 text-lg font-bold">
-            {opp.team} defense <span className="text-xs font-normal text-slate-500">{opp.games} games</span>
-          </p>
-          <p className="mb-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">DK points allowed / game</p>
-          {OFFENSE.map((pos) => (
-            <StatRow
-              key={pos}
-              label={`to ${pos}s`}
-              value={opp.defense.dkAllowed[pos]}
-              rank={opp.defense.ranks.dkAllowed[pos]}
-              count={teamCount}
-              goodIsHigh
-              highlight={pos === player.position}
-            />
-          ))}
-          <div className="my-2 border-t border-slate-800" />
-          <StatRow label="Points allowed / game" value={opp.defense.pointsAllowed} rank={opp.defense.ranks.pointsAllowed} count={teamCount} goodIsHigh />
-          <StatRow label="Pass yds allowed / game" value={opp.defense.passYdsAllowed} rank={opp.defense.ranks.passYdsAllowed} count={teamCount} goodIsHigh />
-          <StatRow label="Rush yds allowed / game" value={opp.defense.rushYdsAllowed} rank={opp.defense.ranks.rushYdsAllowed} count={teamCount} goodIsHigh />
-          <p className="mt-3 text-[11px] text-slate-500">Rank 1 = allows the most. Green = softer matchup.</p>
-        </>
-      )}
-    </div>
-  );
-}
-
-function StatRow({
-  label,
-  value,
-  rank,
-  count,
-  goodIsHigh,
-  highlight = false,
-}: {
-  label: string;
-  value: number;
-  rank: number;
-  count: number;
-  goodIsHigh: boolean;
-  highlight?: boolean;
-}) {
-  return (
-    <div className={`flex items-center justify-between rounded-lg px-2 py-1 ${highlight ? "bg-emerald-500/10 ring-1 ring-emerald-400/40" : ""}`}>
-      <span className={highlight ? "font-semibold text-white" : "text-slate-400"}>{label}</span>
-      <span>
-        <span className="font-semibold text-white">{value.toFixed(1)}</span>
-        <span className={`ml-2 inline-block w-10 text-right text-xs ${rankTone(rank, count, goodIsHigh)}`}>{ordinal(rank)}</span>
-      </span>
-    </div>
   );
 }
