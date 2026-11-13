@@ -14,6 +14,8 @@ export type StackRules = {
   maxPerTeam: number;
   /** When stacking, the QB must come from one of these teams (null = any). */
   stackTeams: string[] | null;
+  /** Exact number of TEs: 2 = a TE in the FLEX, 1 = never, null = the optimizer decides. */
+  teCount: 1 | 2 | null;
 };
 
 /** No rules: the plain best lineup under the cap. */
@@ -24,6 +26,7 @@ export const NO_RULES: StackRules = {
   avoidVsDst: false,
   maxPerTeam: 9,
   stackTeams: null,
+  teCount: null,
 };
 
 /** Defaults for the stacking controls: QB + 1 pass catcher, no bring-back, max 4 per team, no players vs your DST. */
@@ -34,6 +37,7 @@ export const DEFAULT_STACK_RULES: StackRules = {
   avoidVsDst: true,
   maxPerTeam: 4,
   stackTeams: null,
+  teCount: null,
 };
 
 export type StackSummary = { team: string; withQb: number; bringBack: number; label: string } | null;

@@ -113,6 +113,8 @@ export async function solveLineup(
   add("wr_max", sum(ones(idx("WR"))), "<=", 4);
   add("te_min", sum(ones(idx("TE"))), ">=", 1);
   add("te_max", sum(ones(idx("TE"))), "<=", 2);
+  // A TE in the FLEX (2 TEs) or never (1 TE), when chosen.
+  if (rules.teCount) add("te_exact", sum(ones(idx("TE"))), "=", rules.teCount);
   add("flex", sum(ones(idx(OFFENSE))), "=", 7);
 
   // Team cap.
@@ -213,6 +215,8 @@ export type MultiRequest = SolveRequest & {
   maxStackExposure?: number;
   randomness: number;
   seed?: number;
+  /** Share (0–1) of lineups built with 2 TEs (the rest with 1); null/undefined = the optimizer decides. */
+  twoTeShare?: number | null;
 };
 
 export type MultiResult = { lineups: SolvedLineup[]; exposure: Record<string, number>; warnings: string[] };
@@ -262,10 +266,22 @@ export async function solveLineups(req: MultiRequest): Promise<MultiResult> {
               return [p.id, p.projected > 0 ? Math.max(0.01, p.projected + req.randomness * gaussian(random) * sigma) : p.projected];
             }),
           );
-    const result = await solveLineup(
-      { ...req, excludedIds: [...(req.excludedIds ?? []), ...capped] },
-      { previous: lineups.map((l) => l.ids), minUnique: req.minUnique, objective, forbiddenStackTeams },
-    );
+    // Spread the 2-TE lineups evenly through the build (e.g. 30% of 10 → lineups 4, 7 and 10).
+    const share = req.twoTeShare;
+    const teCount: 1 | 2 | null =
+      share === null || share === undefined ? (req.rules?.teCount ?? null) : Math.floor((i + 1) * share + 1e-9) > Math.floor(i * share + 1e-9) ? 2 : 1;
+    const attempt = (te: 1 | 2 | null) =>
+      solveLineup(
+        { ...req, rules: { ...(req.rules ?? NO_RULES), teCount: te }, excludedIds: [...(req.excludedIds ?? []), ...capped] },
+        { previous: lineups.map((l) => l.ids), minUnique: req.minUnique, objective, forbiddenStackTeams },
+      );
+    let result = await attempt(teCount);
+    if (!result.ok && teCount !== null && share !== null && share !== undefined) {
+      // Couldn't meet the TE count for this lineup: let the optimizer choose rather than stop.
+      const retry = await attempt(null);
+      if (retry.ok) warnings.push(`Lineup ${i + 1} couldn't use ${teCount} TE${teCount > 1 ? "s" : ""} under the other rules, so the optimizer chose.`);
+      result = retry;
+    }
     if (!result.ok) {
       warnings.push(
         lineups.length === 0

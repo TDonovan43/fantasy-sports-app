@@ -47,6 +47,7 @@ function parseRules(raw: unknown): StackRules {
     avoidVsDst: r.avoidVsDst === true,
     maxPerTeam: clamp(Math.round(num(r.maxPerTeam, 9)), 2, 9),
     stackTeams: Array.isArray(r.stackTeams) && r.stackTeams.length ? r.stackTeams.map(str).filter(Boolean) : null,
+    teCount: r.teCount === 1 || r.teCount === 2 ? r.teCount : null,
   };
 }
 
@@ -91,6 +92,7 @@ export async function POST(request: NextRequest) {
       maxExposure: clamp(num(body.maxExposure, 1), 0.1, 1),
       maxStackExposure: clamp(num(body.maxStackExposure, 1), 0.05, 1),
       randomness: clamp(num(body.randomness), 0, 2),
+      twoTeShare: typeof body.twoTeShare === "number" && Number.isFinite(body.twoTeShare) ? clamp(body.twoTeShare, 0, 1) : null,
       seed: Math.round(num(body.seed, 1)),
     });
     return NextResponse.json(result);
