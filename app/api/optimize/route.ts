@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isOwnershipMode } from "@/lib/ownership-weighting";
 import { solveLineup, solveLineups, type SolverPlayer } from "@/lib/solver";
 import { NO_RULES, type StackRules } from "@/lib/stack-rules";
 import type { Position } from "@/lib/types";
@@ -34,6 +35,16 @@ function parsePlayers(raw: unknown): SolverPlayer[] {
   });
 }
 
+/** { playerId: ownership 0–1 }, dropping anything malformed. */
+function parseOwnership(raw: unknown): Record<string, number> | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .slice(0, MAX_PLAYERS)
+    .filter((e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1]))
+    .map(([id, v]) => [id, clamp(v, 0, 1)] as const);
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 function parseRules(raw: unknown): StackRules {
   if (!raw || typeof raw !== "object") return NO_RULES;
   const r = raw as Record<string, unknown>;
@@ -54,7 +65,7 @@ function parseRules(raw: unknown): StackRules {
 /**
  * Solves one lineup, or several (`count` > 1), with the stacking and diversity rules.
  * Body: { players, games, salaryCap, lockedIds, excludedIds, rules, count, minUnique, maxExposure,
- *         maxStackExposure, randomness, seed }. Returns player ids per lineup.
+ *         maxStackExposure, randomness, seed, ownership, ownershipMode }. Returns player ids per lineup.
  */
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown>;
@@ -94,6 +105,8 @@ export async function POST(request: NextRequest) {
       randomness: clamp(num(body.randomness), 0, 2),
       twoTeShare: typeof body.twoTeShare === "number" && Number.isFinite(body.twoTeShare) ? clamp(body.twoTeShare, 0, 1) : null,
       seed: Math.round(num(body.seed, 1)),
+      ownership: parseOwnership(body.ownership),
+      ownershipMode: isOwnershipMode(body.ownershipMode) ? body.ownershipMode : null,
     });
     return NextResponse.json(result);
   } catch (error) {

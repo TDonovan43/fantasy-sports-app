@@ -2,6 +2,7 @@
 import loadHighs from "highs";
 import { isInactive } from "@/lib/dk-salaries";
 import { stoppedEarlyMessage } from "@/lib/optimizer";
+import { ownershipPlan, playersDue, type OwnershipMode } from "@/lib/ownership-weighting";
 import { NO_RULES, type StackRules } from "@/lib/stack-rules";
 
 export { NO_RULES, type StackRules };
@@ -205,6 +206,9 @@ export async function solveLineup(
   };
 }
 
+/** Most chalk players pushed into one lineup to meet ownership minimums. */
+const MAX_FORCED = 6;
+
 // ---- Multiple lineups ----------------------------------------------------------------------------
 
 export type MultiRequest = SolveRequest & {
@@ -218,6 +222,9 @@ export type MultiRequest = SolveRequest & {
   seed?: number;
   /** Share (0–1) of lineups built with 2 TEs (the rest with 1); null/undefined = the optimizer decides. */
   twoTeShare?: number | null;
+  /** Projected ownership (0–1) by player id, and how to weight lineups against it. */
+  ownership?: Record<string, number>;
+  ownershipMode?: OwnershipMode | null;
 };
 
 export type MultiResult = { lineups: SolvedLineup[]; exposure: Record<string, number>; warnings: string[] };
@@ -254,9 +261,20 @@ export async function solveLineups(req: MultiRequest): Promise<MultiResult> {
   const warnings: string[] = [];
   const byId = new Map(req.players.map((p) => [p.id, p]));
   const stacking = (req.rules?.qbStack ?? 0) > 0;
+  const own = ownershipPlan(req.ownership, req.ownershipMode, req.count);
+  const capFor = (id: string) => Math.min(cap, own?.caps.get(id) ?? cap);
+  const excludedSet = new Set(req.excludedIds ?? []);
+  /** Chalk players that may be pushed into a lineup to meet their ownership minimum. */
+  const forceable = (id: string) => {
+    const p = byId.get(id);
+    if (!p || locked.has(id) || excludedSet.has(id) || p.salary <= 0 || p.projected <= 0 || isInactive(p.injury)) return false;
+    if ((exposure.get(id) ?? 0) >= cap) return false;
+    // A forced QB would bypass the chosen stack teams.
+    return !(p.position === "QB" && req.rules?.stackTeams && !req.rules.stackTeams.includes(p.team));
+  };
 
   for (let i = 0; i < req.count; i++) {
-    const capped = [...exposure].filter(([id, n]) => n >= cap && !locked.has(id)).map(([id]) => id);
+    const capped = [...exposure].filter(([id, n]) => n >= capFor(id) && !locked.has(id)).map(([id]) => id);
     const forbiddenStackTeams = stacking ? new Set([...stackCounts].filter(([, n]) => n >= stackCap).map(([t]) => t)) : undefined;
     const objective =
       i === 0 || req.randomness <= 0
@@ -267,15 +285,30 @@ export async function solveLineups(req: MultiRequest): Promise<MultiResult> {
               return [p.id, p.projected > 0 ? Math.max(0.01, p.projected + req.randomness * gaussian(random) * sigma) : p.projected];
             }),
           );
+    // Chalk behind schedule for its ownership minimum goes into this lineup (as many as still fit).
+    const due = own ? playersDue(own, exposure, i, req.count).filter(forceable).slice(0, MAX_FORCED) : [];
     // Spread the 2-TE lineups evenly through the build (e.g. 30% of 10 → lineups 4, 7 and 10).
     const share = req.twoTeShare;
     const teCount: 1 | 2 | null =
       share === null || share === undefined ? (req.rules?.teCount ?? null) : Math.floor((i + 1) * share + 1e-9) > Math.floor(i * share + 1e-9) ? 2 : 1;
-    const attempt = (te: 1 | 2 | null) =>
+    const solveWith = (te: 1 | 2 | null, forced: string[]) =>
       solveLineup(
-        { ...req, rules: { ...(req.rules ?? NO_RULES), teCount: te }, excludedIds: [...(req.excludedIds ?? []), ...capped] },
+        {
+          ...req,
+          rules: { ...(req.rules ?? NO_RULES), teCount: te },
+          lockedIds: [...(req.lockedIds ?? []), ...forced],
+          excludedIds: [...(req.excludedIds ?? []), ...capped.filter((id) => !forced.includes(id))],
+        },
         { previous: lineups.map((l) => l.ids), minUnique: req.minUnique, objective, forbiddenStackTeams },
       );
+    const attempt = async (te: 1 | 2 | null) => {
+      // Drop the least-behind forced player until the lineup can be built.
+      for (let k = due.length; k > 0; k--) {
+        const r = await solveWith(te, due.slice(0, k));
+        if (r.ok) return r;
+      }
+      return solveWith(te, []);
+    };
     let result = await attempt(teCount);
     if (!result.ok && teCount !== null && share !== null && share !== undefined) {
       // Couldn't meet the TE count for this lineup: let the optimizer choose rather than stop.
