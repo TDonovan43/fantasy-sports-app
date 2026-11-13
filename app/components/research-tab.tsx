@@ -68,6 +68,29 @@ const STAT_COLUMNS: Record<PositionFilter, Column[]> = {
   ],
 };
 
+/** FieldGoal's own projection (Proj may be ETR or a blend, depending on the Projections setting). */
+const fieldgoalProj = (p: PoolPlayer) => p.fieldgoal?.projected ?? p.projected;
+const pctCol = (v: number) => `${v.toFixed(1)}%`;
+
+/** Columns that don't depend on FieldGoal's research data. */
+const ALWAYS_SHOWN = new Set(["salary", "etr", "etrCeil", "ownLarge", "ownSmall"]);
+
+/** Shown when ETR projections are loaded in this browser. */
+const ETR_COLUMNS: Column[] = [
+  { key: "fg", label: "FG", title: "FieldGoal's projection", value: (p) => (p.projected > 0 || p.fieldgoal ? fieldgoalProj(p) : null), format: fmt1 },
+  { key: "etr", label: "ETR", title: "Establish The Run's DraftKings projection", value: (p) => p.etr?.projected, format: fmt1 },
+  {
+    key: "diff",
+    label: "Diff",
+    title: "ETR minus FieldGoal: positive means ETR is higher",
+    value: (p) => (p.etr && (p.projected > 0 || p.fieldgoal) ? Math.round((p.etr.projected - fieldgoalProj(p)) * 10) / 10 : null),
+    format: (v) => (v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1)),
+  },
+  { key: "etrCeil", label: "ETR Ceil", title: "ETR's ceiling", value: (p) => p.etr?.ceiling, format: fmt1 },
+  { key: "ownLarge", label: "Own LF", title: "ETR projected ownership, large-field contests", value: (p) => p.etr?.ownLarge, format: pctCol },
+  { key: "ownSmall", label: "Own SF", title: "ETR projected ownership, small-field contests", value: (p) => p.etr?.ownSmall, format: pctCol },
+];
+
 const FACTOR_COLUMNS: Column[] = [
   { key: "matchup", label: "Matchup", title: "Opponent adjustment vs. this position", value: (_, r) => r.matchupFactor, format: pct },
   { key: "vegas", label: "Vegas", title: "Implied team total vs. team scoring average (DST: opponent's implied total)", value: (_, r) => r.vegasFactor, format: pct },
@@ -115,7 +138,13 @@ export default function ResearchTab({
 
   const teams = slate.teams ?? {};
   const teamCount = Object.keys(teams).length;
-  const columns = useMemo(() => [...BASE_COLUMNS, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS], [position]);
+  const hasEtr = slate.players.some((p) => p.etr);
+  const columns = useMemo(() => {
+    if (!hasEtr) return [...BASE_COLUMNS, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
+    // Proj, then the FieldGoal vs ETR comparison, then the rest.
+    const [salary, projected, ...rest] = BASE_COLUMNS;
+    return [salary, projected, ...ETR_COLUMNS, ...rest, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
+  }, [position, hasEtr]);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -123,7 +152,7 @@ export default function ResearchTab({
     const source = showUnprojected ? [...slate.players, ...(slate.unprojected ?? [])] : slate.players;
     const list = source.filter(
       (p) =>
-        (p.research || p.projected === 0) &&
+        (p.research || p.projected === 0 || p.etr) &&
         (position === "ALL" || p.position === position) &&
         (!q || p.name.toLowerCase().includes(q) || p.team.toLowerCase().includes(q)),
     );
@@ -232,7 +261,17 @@ export default function ResearchTab({
                         {p.position} · {p.team}
                         {p.injury && <span className="ml-1 font-semibold text-amber-300">{p.injury}</span>}
                         {r.roleFactor < 1 && <span className="ml-1 text-slate-400">backup</span>}
-                        {unprojected && <span className="ml-1 text-slate-400">no projection</span>}
+                        {unprojected && p.projected === 0 && <span className="ml-1 text-slate-400">no projection</span>}
+                        {unprojected && p.projected > 0 && p.etr && (
+                          <span title="Only Establish The Run projects this player" className="ml-1 text-violet-300">
+                            ETR only
+                          </span>
+                        )}
+                        {hasEtr && !p.etr && p.projected > 0 && (
+                          <span title="Establish The Run's file doesn't include this player (often means he's not expected to play)" className="ml-1 text-violet-300">
+                            not in ETR
+                          </span>
+                        )}
                       </span>
                     </button>
                     {r.limitedData && (
@@ -259,7 +298,8 @@ export default function ResearchTab({
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";
                     const tone = isFactor && typeof v === "number" ? (v > 1.02 ? "text-emerald-300" : v < 0.98 ? "text-rose-300" : "text-slate-400") : "";
-                    const blank = unprojected && c.key !== "salary";
+                    // Players without FieldGoal research still show salary, projection and ETR's numbers.
+                    const blank = unprojected && !ALWAYS_SHOWN.has(c.key) && !(c.key === "projected" && p.projected > 0);
                     return (
                       <td key={c.key} className={`px-3 py-2 ${c.key === "projected" ? "font-bold text-emerald-300" : tone || "text-slate-300"}`}>
                         {blank || v === null || v === undefined ? "—" : c.format ? c.format(v) : v}

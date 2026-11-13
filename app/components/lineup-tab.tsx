@@ -21,7 +21,19 @@ import {
 import type { StarterControls } from "@/lib/starters";
 import type { PoolPlayer, Position, SlateData } from "@/lib/types";
 
-type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value";
+type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value" | "etr" | "own";
+
+/** Sum of ETR projected ownership (large field) across a lineup, in %. */
+function totalOwnership(players: PoolPlayer[]) {
+  return players.reduce((sum, p) => sum + (p.etr?.ownLarge ?? 0), 0);
+}
+
+/** Sort value for a column (ETR columns sort players without ETR data last). */
+function sortValue(p: PoolPlayer, key: Exclude<SortKey, "name">) {
+  if (key === "etr") return p.etr?.projected ?? -1;
+  if (key === "own") return p.etr?.ownLarge ?? -1;
+  return p[key];
+}
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
@@ -97,6 +109,9 @@ export default function LineupTab({
   const remaining = slate.salaryCap - salaryUsed;
   const openSlots = slots.filter((s) => s === null).length;
   const hasDst = slate.players.some((p) => p.position === "DST");
+  /** ETR projections were uploaded in this browser. */
+  const hasEtr = slate.players.some((p) => p.etr);
+  const hasOwnership = slate.players.some((p) => p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined);
 
   /** Selected games still in this slate (the DK slate selector can remove some). */
   const activeGames = useMemo(() => slate.games.filter((g) => selectedGameIds.includes(g.id)), [slate.games, selectedGameIds]);
@@ -149,7 +164,8 @@ export default function LineupTab({
       return true;
     });
     const dir = sort.desc ? -1 : 1;
-    return rows.sort((a, b) => (sort.key === "name" ? a.name.localeCompare(b.name) : a[sort.key] - b[sort.key]) * dir);
+    const key = sort.key;
+    return rows.sort((a, b) => (key === "name" ? a.name.localeCompare(b.name) : sortValue(a, key) - sortValue(b, key)) * dir);
   }, [pool, position, selectedTeams, query, sort]);
 
   function resetPaging<T>(fn: (v: T) => void) {
@@ -480,6 +496,11 @@ export default function LineupTab({
                       <span className="text-xl font-black text-amber-300">{p.value.toFixed(2)}x</span>
                       <span className="text-xs text-emerald-300">{p.projected.toFixed(1)} pts</span>
                     </p>
+                    {p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined && (
+                      <p className="text-[11px] text-slate-500" title="ETR projected ownership, large-field contests">
+                        Own {p.etr.ownLarge.toFixed(1)}%
+                      </p>
+                    )}
                     <button
                       onClick={() => (inLineup ? removePlayer(p.id) : addPlayer(p))}
                       aria-label={inLineup ? `Remove ${p.name}` : `Add ${p.name}`}
@@ -535,6 +556,8 @@ export default function LineupTab({
                   <th className="px-3 py-3 uppercase tracking-[0.18em]">Matchup</th>
                   {sortHeader("salary", "Salary")}
                   {sortHeader("projected", "Proj")}
+                  {hasEtr && sortHeader("etr", "ETR")}
+                  {hasOwnership && sortHeader("own", "Own")}
                   {sortHeader("floor", "Floor")}
                   {sortHeader("ceiling", "Ceil")}
                   {sortHeader("value", "Value")}
@@ -572,6 +595,11 @@ export default function LineupTab({
                             </span>
                           )}
                           {p.projected === 0 && <span className="ml-1 text-slate-400">no projection</span>}
+                          {hasEtr && !p.etr && p.projected > 0 && (
+                            <span title="Establish The Run's file doesn't include this player (often means he's not expected to play)" className="ml-1 text-violet-300">
+                              not in ETR
+                            </span>
+                          )}
                         </p>
                       </td>
                       <td className="px-3 py-2 text-slate-400">{p.opponent ? `vs ${p.opponent}` : "—"}</td>
@@ -583,7 +611,18 @@ export default function LineupTab({
                             avg
                           </span>
                         )}
+                        {p.fieldgoal && (
+                          <span title="FieldGoal's own projection" className="block text-[10px] font-normal text-slate-500">
+                            FG {p.fieldgoal.projected.toFixed(1)}
+                          </span>
+                        )}
                       </td>
+                      {hasEtr && <td className="px-3 py-2 text-violet-200">{p.etr ? p.etr.projected.toFixed(1) : "—"}</td>}
+                      {hasOwnership && (
+                        <td className="px-3 py-2 text-slate-300" title={p.etr?.ownSmall !== null && p.etr?.ownSmall !== undefined ? `Small field: ${p.etr.ownSmall.toFixed(1)}%` : undefined}>
+                          {p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined ? `${p.etr.ownLarge.toFixed(1)}%` : "—"}
+                        </td>
+                      )}
                       <td className="px-3 py-2 text-slate-400">{p.floor.toFixed(1)}</td>
                       <td className="px-3 py-2 text-slate-400">{p.ceiling.toFixed(1)}</td>
                       <td className="px-3 py-2 text-amber-300">{p.value > 0 ? `${p.value.toFixed(2)}x` : "—"}</td>
@@ -621,7 +660,14 @@ export default function LineupTab({
             <span className={remaining < 0 ? "font-bold text-rose-400" : "text-slate-300"}>
               {remaining < 0 ? "-" : ""}${Math.abs(remaining).toLocaleString("en-US")} left
             </span>
-            <span className="font-bold text-emerald-300">{lineupProjection(lineup).toFixed(1)} pts</span>
+            <span className="font-bold text-emerald-300">
+              {lineupProjection(lineup).toFixed(1)} pts
+              {hasOwnership && lineup.length > 0 && (
+                <span className="ml-2 text-xs font-normal text-slate-400" title="Sum of ETR projected ownership (large field)">
+                  Own {totalOwnership(lineup).toFixed(0)}%
+                </span>
+              )}
+            </span>
           </div>
           <div className="mb-1 h-2 overflow-hidden rounded-full bg-slate-800">
             <div
@@ -872,6 +918,7 @@ export default function LineupTab({
           players={byId}
           opponentOf={opponentOf}
           rules={stackRules}
+          showOwnership={hasOwnership}
           onLoad={(ids) => {
             setLineupIds(ids);
             setMessage("Loaded into the editor.");
@@ -889,6 +936,7 @@ function BuiltLineups({
   players,
   opponentOf,
   rules,
+  showOwnership,
   onLoad,
   onExport,
   onClear,
@@ -897,6 +945,7 @@ function BuiltLineups({
   players: Map<string, PoolPlayer>;
   opponentOf: Map<string, string>;
   rules: StackRules;
+  showOwnership: boolean;
   onLoad: (ids: string[]) => void;
   onExport: () => void;
   onClear: () => void;
@@ -971,6 +1020,7 @@ function BuiltLineups({
                 <p className="text-sm">
                   <span className="font-bold text-emerald-300">{l.projected.toFixed(1)} pts</span>
                   <span className="ml-2 text-slate-500">{money(l.salary)}</span>
+                  {showOwnership && <span className="ml-2 text-xs text-slate-500">Own {totalOwnership(l.players).toFixed(0)}%</span>}
                 </p>
               </div>
               {stack && <p className="mb-2 text-xs text-sky-300">{stack.label}</p>}

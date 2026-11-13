@@ -6,6 +6,7 @@ import GamesTab from "@/app/components/games-tab";
 import LineupTab from "@/app/components/lineup-tab";
 import ResearchTab from "@/app/components/research-tab";
 import { applyDkSalariesToSlate, dkFileDates, parseDkSalariesCsv, salaryFileMatchesSlate, shortDate } from "@/lib/dk-salaries";
+import { applyProjectionSource, mergeEtr, parseEtrCsv, type ProjectionMode } from "@/lib/etr";
 import { SLATE_OPTIONS, filterSlate, gameInSlate, type SlateFilter } from "@/lib/slates";
 import { matchesOverride, toggleOverride, type StarterControls } from "@/lib/starters";
 import type { PoolPlayer, SlateData, StarterOverride } from "@/lib/types";
@@ -35,6 +36,12 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
   const [recalculated, setRecalculated] = useState<{ key: string; slate: SlateData } | null>(null);
   const [recalcError, setRecalcError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  // Establish The Run projections: browser-only (paid content never leaves this browser).
+  const etrKey = `fieldgoal-etr-${initialSlate.season}-${initialSlate.week}`;
+  const [etrUpload, setEtrUpload] = useState<Upload | null>(null);
+  const [projectionMode, setProjectionMode] = useState<ProjectionMode>("fieldgoal");
+  const [etrWeight, setEtrWeight] = useState(50);
+  const etrInput = useRef<HTMLInputElement>(null);
 
   // Browser-only state (saved upload, tab in the URL hash) is read after mount.
   useEffect(() => {
@@ -46,10 +53,18 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
       if (raw) setUpload(JSON.parse(raw) as Upload);
       const savedStarters = localStorage.getItem(startersKey);
       if (savedStarters) setStarters(JSON.parse(savedStarters) as StarterOverride[]);
+      const savedEtr = localStorage.getItem(etrKey);
+      if (savedEtr) setEtrUpload(JSON.parse(savedEtr) as Upload);
+      const savedSource = localStorage.getItem("fieldgoal-projection-source");
+      if (savedSource) {
+        const { mode, weight } = JSON.parse(savedSource) as { mode: ProjectionMode; weight: number };
+        if (mode === "fieldgoal" || mode === "etr" || mode === "blend") setProjectionMode(mode);
+        if (typeof weight === "number") setEtrWeight(weight);
+      }
     } catch {
       // Storage unavailable; uploads and overrides just won't persist.
     }
-  }, [storageKey, startersKey]);
+  }, [storageKey, startersKey, etrKey]);
 
   const overridesParam = starters.length ? JSON.stringify(starters) : "";
 
@@ -110,15 +125,81 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
     }
   }, [baseSlate, upload]);
 
-  const slateView = useMemo(() => filterSlate(slate, slateFilter), [slate, slateFilter]);
+  /** ETR numbers attached to the slate (FieldGoal projections unchanged). */
+  const etr = useMemo(() => {
+    if (!etrUpload) return null;
+    try {
+      return mergeEtr(slate, parseEtrCsv(etrUpload.csv));
+    } catch {
+      return null;
+    }
+  }, [slate, etrUpload]);
+
+  /** The slate with projections from the chosen source (FieldGoal, ETR or a blend). */
+  const sourced = useMemo(
+    () => (etr ? applyProjectionSource(etr.slate, projectionMode, etrWeight / 100, etr.complete) : slate),
+    [etr, slate, projectionMode, etrWeight],
+  );
+
+  function chooseSource(mode: ProjectionMode, weight = etrWeight) {
+    setProjectionMode(mode);
+    setEtrWeight(weight);
+    try {
+      localStorage.setItem("fieldgoal-projection-source", JSON.stringify({ mode, weight }));
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleEtrFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const csv = await file.text();
+      const rows = parseEtrCsv(csv);
+      const merged = mergeEtr(slate, rows);
+      if (merged.matched < Math.min(50, rows.length * 0.3)) {
+        setUploadMessage(
+          `Not applied: only ${merged.matched} of ${rows.length} players in ${file.name} match this week's pool. Check it's the current week's DraftKings file.`,
+        );
+        return;
+      }
+      const next: Upload = { csv, uploadedAt: new Date().toISOString(), fileName: file.name };
+      setEtrUpload(next);
+      setUploadMessage(
+        `Loaded ETR projections from ${file.name}: ${merged.matched} of ${rows.length} players matched${merged.hasOwnership ? ", with projected ownership" : ""}. Choose how to use them under "Projections" below the tabs.`,
+      );
+      try {
+        localStorage.setItem(etrKey, JSON.stringify(next));
+      } catch {
+        // Too large or storage blocked; still applied for this session.
+      }
+    } catch (error) {
+      setUploadMessage(error instanceof Error ? error.message : "Couldn't read that file.");
+    }
+  }
+
+  function clearEtr() {
+    setEtrUpload(null);
+    chooseSource("fieldgoal");
+    setUploadMessage("Removed the ETR projections.");
+    try {
+      localStorage.removeItem(etrKey);
+    } catch {
+      // ignore
+    }
+  }
+
+  const slateView = useMemo(() => filterSlate(sourced, slateFilter), [sourced, slateFilter]);
   const slateCounts = useMemo(
     () => Object.fromEntries(SLATE_OPTIONS.map((o) => [o.id, slate.games.filter((g) => gameInSlate(g, o.id)).length])) as Record<SlateFilter, number>,
     [slate.games],
   );
 
   const topValue = useMemo(
-    () => slate.players.filter((p) => p.salary > 0).reduce<PoolPlayer | null>((best, p) => (!best || p.value > best.value ? p : best), null),
-    [slate.players],
+    () => sourced.players.filter((p) => p.salary > 0).reduce<PoolPlayer | null>((best, p) => (!best || p.value > best.value ? p : best), null),
+    [sourced.players],
   );
 
   async function handleSalaryFile(event: ChangeEvent<HTMLInputElement>) {
@@ -205,6 +286,19 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
                 Remove {upload.fileName}
               </button>
             )}
+            <input ref={etrInput} type="file" accept=".csv,text/csv" onChange={handleEtrFile} className="hidden" />
+            <button
+              onClick={() => etrInput.current?.click()}
+              title="Establish The Run's DraftKings projections file. Stays in this browser only."
+              className="rounded-full border border-violet-400/60 px-3 py-1 font-semibold text-violet-200 hover:bg-violet-500/10"
+            >
+              {etrUpload ? "Replace ETR projections" : "Upload ETR projections"}
+            </button>
+            {etrUpload && (
+              <button onClick={clearEtr} className="rounded-full border border-slate-700 px-3 py-1 text-slate-300 hover:border-rose-400">
+                Remove ETR
+              </button>
+            )}
             {topValue && (
               <span className="rounded-full border border-amber-400/40 bg-amber-500/10 px-3 py-1 text-amber-300">
                 Top value: {topValue.name} ({topValue.value.toFixed(2)}x)
@@ -219,6 +313,23 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
             {slate.notices.map((n) => (
               <li key={n}>{n}</li>
             ))}
+            {etr && (
+              <li>
+                ETR projections loaded ({etr.matched} of {etr.total} players matched{etr.hasOwnership ? ", with ownership" : ""}); kept in this browser only.
+                {etr.missing.length > 0 && (
+                  <>
+                    {" "}
+                    ETR leaves out {etr.missing.length} player{etr.missing.length > 1 ? "s" : ""} we project for 5+ points, likely ruled out:{" "}
+                    {etr.missing
+                      .slice(0, 6)
+                      .map((p) => `${p.name} (${p.team})`)
+                      .join(", ")}
+                    {etr.missing.length > 6 ? ", …" : ""}.{" "}
+                    {etr.complete ? "They're left out in ETR mode and tagged in Blend mode." : "They're tagged \"not in ETR\"."}
+                  </>
+                )}
+              </li>
+            )}
           </ul>
         )}
 
@@ -274,6 +385,52 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
               />
               Show unprojected ({slateView.unprojected?.length ?? 0})
             </label>
+          </div>
+        )}
+
+        {etr && (tab === "lineup" || tab === "research") && (
+          <div className="-mt-3 mb-6 flex flex-wrap items-center gap-2" role="group" aria-label="Projection source">
+            <span className="mr-1 text-xs uppercase tracking-[0.2em] text-slate-500">Projections</span>
+            {(
+              [
+                ["fieldgoal", "FieldGoal"],
+                ["etr", "ETR"],
+                ["blend", "Blend"],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                aria-pressed={projectionMode === mode}
+                onClick={() => chooseSource(mode)}
+                className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+                  projectionMode === mode ? "border-violet-400 bg-violet-400 text-slate-950" : "border-slate-700 text-slate-300 hover:border-slate-500"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {projectionMode === "blend" && (
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={etrWeight}
+                  onChange={(e) => chooseSource("blend", Number(e.target.value))}
+                  className="w-32 accent-violet-400"
+                  aria-label="ETR weight in the blend"
+                />
+                {etrWeight}% ETR · {100 - etrWeight}% FieldGoal
+              </label>
+            )}
+            <span className="text-xs text-slate-500">
+              {projectionMode === "fieldgoal"
+                ? "Optimizer uses FieldGoal; ETR shown alongside."
+                : projectionMode === "etr"
+                  ? "Optimizer uses ETR's projections, floors and ceilings."
+                  : "Optimizer uses the blend; players ETR doesn't project keep FieldGoal's number."}
+            </span>
           </div>
         )}
 
