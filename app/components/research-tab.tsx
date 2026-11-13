@@ -73,7 +73,7 @@ const fieldgoalProj = (p: PoolPlayer) => p.fieldgoal?.projected ?? p.projected;
 const pctCol = (v: number) => `${v.toFixed(1)}%`;
 
 /** Columns that don't depend on FieldGoal's research data. */
-const ALWAYS_SHOWN = new Set(["salary", "etr", "etrCeil", "ownLarge", "ownSmall"]);
+const ALWAYS_SHOWN = new Set(["salary", "etr", "etrCeil", "ownLarge", "ownSmall", "weather"]);
 
 /** Shown when ETR projections are loaded in this browser. */
 const ETR_COLUMNS: Column[] = [
@@ -95,6 +95,12 @@ const FACTOR_COLUMNS: Column[] = [
   { key: "matchup", label: "Matchup", title: "Opponent adjustment vs. this position", value: (_, r) => r.matchupFactor, format: pct },
   { key: "vegas", label: "Vegas", title: "Implied team total vs. team scoring average (DST: opponent's implied total)", value: (_, r) => r.vegasFactor, format: pct },
   { key: "implied", label: "Implied", title: "Implied team total (DST: opponent's)", value: (_, r) => r.impliedTotal, format: fmt1 },
+  {
+    key: "weather",
+    label: "Weather",
+    title: "Estimated weather effect at kickoff (2023–26 results). For awareness only: not applied to projections.",
+    value: (p) => p.weatherImpact?.pct,
+  },
 ];
 
 /** Green for a soft matchup, red for a tough one. `goodIsHigh`: rank 1 helps the player. */
@@ -298,6 +304,18 @@ export default function ResearchTab({
                     const v = c.value(p, r);
                     const isFactor = c.key === "matchup" || c.key === "vegas";
                     const tone = isFactor && typeof v === "number" ? (v > 1.02 ? "text-emerald-300" : v < 0.98 ? "text-rose-300" : "text-slate-400") : "";
+                    if (c.key === "weather") {
+                      const w = p.weatherImpact;
+                      return (
+                        <td
+                          key={c.key}
+                          title={w?.detail}
+                          className={`px-3 py-2 text-xs ${(w?.pct ?? 0) < 0 ? "text-rose-300" : (w?.pct ?? 0) > 0 ? "text-emerald-300" : "text-slate-500"}`}
+                        >
+                          {w?.label ?? "—"}
+                        </td>
+                      );
+                    }
                     // Players without FieldGoal research still show salary, projection and ETR's numbers.
                     const blank = unprojected && !ALWAYS_SHOWN.has(c.key) && !(c.key === "projected" && p.projected > 0);
                     return (
