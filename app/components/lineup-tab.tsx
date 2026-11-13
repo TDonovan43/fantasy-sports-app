@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { isInactive } from "@/lib/dk-salaries";
-import { formatKickoff, formatLine, impliedTotals, money } from "@/lib/format";
+import { formatKickoff, formatLine, impliedTotals, money, opponentLabel } from "@/lib/format";
 import { DEFAULT_STACK_RULES, NO_RULES, describeStack, type StackRules } from "@/lib/stack-rules";
 import {
   ROSTER_SLOTS,
@@ -491,7 +491,7 @@ export default function LineupTab({
                     </p>
                     <p className="truncate text-xs text-slate-500">
                       {p.team}
-                      {p.opponent ? ` vs ${p.opponent}` : ""} · {money(p.salary)}
+                      {p.opponent ? ` ${opponentLabel(p)}` : ""} · {money(p.salary)}
                       {p.injury && <span className="ml-1 font-semibold text-amber-300">{p.injury}</span>}
                     </p>
                     <p className="mt-2 flex items-baseline justify-between gap-2">
@@ -607,7 +607,7 @@ export default function LineupTab({
                           )}
                         </p>
                       </td>
-                      <td className="px-3 py-2 text-slate-400">{p.opponent ? `vs ${p.opponent}` : "—"}</td>
+                      <td className="px-3 py-2 text-slate-400">{opponentLabel(p)}</td>
                       <td
                         className={`whitespace-nowrap px-3 py-2 text-xs ${
                           (p.weatherImpact?.pct ?? 0) < 0 ? "text-rose-300" : (p.weatherImpact?.pct ?? 0) > 0 ? "text-emerald-300" : "text-slate-500"

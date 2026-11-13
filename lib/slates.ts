@@ -33,6 +33,17 @@ export function gameInSlate(game: Matchup, filter: SlateFilter) {
   return filter === "main" ? window !== null : window === filter;
 }
 
+/** Marks each player home or away from this week's schedule. */
+export function markHomeAway(slate: SlateData): SlateData {
+  const home = new Map<string, boolean>();
+  for (const g of slate.games) {
+    home.set(g.homeTeam, true);
+    home.set(g.awayTeam, false);
+  }
+  const tag = (p: SlateData["players"][number]) => (home.has(p.team) ? { ...p, isHome: home.get(p.team) } : p);
+  return { ...slate, players: slate.players.map(tag), unprojected: slate.unprojected?.map(tag) };
+}
+
 /** Restricts a slate's games and players (by team) to one DraftKings slate. */
 export function filterSlate(slate: SlateData, filter: SlateFilter): SlateData {
   if (filter === "all") return slate;
