@@ -335,7 +335,7 @@ async function computeSlateData(options: SlateOptions = {}): Promise<SlateData> 
 // ---- Snapshot: the finished default slate, saved in the database --------------------------------
 
 /** Bump the suffix when the slate's shape changes, so new code never serves an old-shape snapshot. */
-const SNAPSHOT_ID = "current-v2"; // v2: research.gameLog
+const SNAPSHOT_ID = "current-v3"; // v2: research.gameLog, v3: research.stdDev
 /** Served as-is while younger than this. */
 const SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
 /** Older than this, a visitor waits for a fresh build instead of seeing stale data. */
