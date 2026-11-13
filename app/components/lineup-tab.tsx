@@ -84,6 +84,8 @@ export default function LineupTab({
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "projected", desc: true });
   const [visible, setVisible] = useState(PAGE_SIZE);
   const [lineupIds, setLineupIds] = useState<string[]>([]);
+  /** Editor players kept in every optimized/built lineup. Players you add are locked; ones the optimizer fills in aren't. */
+  const [lockIds, setLockIds] = useState<string[]>([]);
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [multiCount, setMultiCount] = useState(5);
@@ -108,6 +110,7 @@ export default function LineupTab({
     [slate.players, slate.unprojected],
   );
   const lineup = useMemo(() => lineupIds.map((id) => byId.get(id)).filter((p): p is PoolPlayer => !!p), [lineupIds, byId]);
+  const lockedPlayers = lineup.filter((p) => lockIds.includes(p.id));
   const slots = assignSlots(lineup) ?? ROSTER_SLOTS.map(() => null);
   const salaryUsed = lineupSalary(lineup);
   const remaining = slate.salaryCap - salaryUsed;
@@ -197,11 +200,23 @@ export default function LineupTab({
           : null,
     );
     setLineupIds((ids) => [...ids, player.id]);
+    setLockIds((ids) => [...ids, player.id]);
   }
 
   function removePlayer(id: string) {
     setLineupIds((ids) => ids.filter((x) => x !== id));
+    setLockIds((ids) => ids.filter((x) => x !== id));
     setMessage(null);
+  }
+
+  function toggleLock(id: string) {
+    setLockIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  }
+
+  /** Replaces the editor; only the given players stay locked. */
+  function setEditor(ids: string[], locked: string[]) {
+    setLineupIds(ids);
+    setLockIds(locked.filter((id) => ids.includes(id)));
   }
 
   function toggleExclude(id: string) {
@@ -252,7 +267,7 @@ export default function LineupTab({
   /** Players the optimizer may use: the selected games (or all), plus anyone already in the lineup. */
   function optimizerPool() {
     const everyone = [...slate.players, ...(slate.unprojected ?? [])];
-    return selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lineupIds.includes(p.id)) : everyone;
+    return selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lockIds.includes(p.id)) : everyone;
   }
 
   type SolverResponse = { lineups: { ids: string[]; salary: number; projected: number }[]; exposure: Record<string, number>; warnings: string[] };
@@ -277,7 +292,7 @@ export default function LineupTab({
         players,
         games: slate.games.map(({ id, awayTeam, homeTeam }) => ({ id, awayTeam, homeTeam })),
         salaryCap: slate.salaryCap,
-        lockedIds: lineupIds,
+        lockedIds: lockIds,
         excludedIds,
         rules: stackRules,
         ...extra,
@@ -297,6 +312,14 @@ export default function LineupTab({
       return;
     }
     const count = Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount)));
+    const free = ROSTER_SLOTS.length - lockIds.length;
+    const unique = Math.min(9, Math.max(1, Math.round(minUnique)));
+    if (count > 1 && free < unique) {
+      setMessage(
+        `${lockIds.length} players are locked, so only ${free} spot${free === 1 ? "" : "s"} can change, but each lineup must differ by ${unique}. Unlock some players (click the lock) or lower "Min. different players".`,
+      );
+      return;
+    }
     const settings = {
       count,
       minUnique: Math.min(9, Math.max(1, Math.round(minUnique))),
@@ -320,7 +343,7 @@ export default function LineupTab({
       result = generateLineups({
         pool: optimizerPool(),
         salaryCap: slate.salaryCap,
-        lockedIds: lineupIds,
+        lockedIds: lockIds,
         excludedIds,
         ...settings,
         gameOf: (p) => gameOfTeam.get(p.team) ?? p.team,
@@ -332,7 +355,7 @@ export default function LineupTab({
     setBuilt(result);
     setMessage(
       result.lineups.length
-        ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lineupIds.length ? ` around your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.${note}`
+        ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lockIds.length ? ` around your ${lockIds.length} locked player${lockIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.${note}`
         : (result.warnings.at(0) ?? "Couldn't build lineups with these settings.") + note,
     );
   }
@@ -366,7 +389,7 @@ export default function LineupTab({
       if (l) picked = { players: toPlayers(l.ids), salary: l.salary, projected: l.projected };
       else failure = r.warnings.at(0) ?? "No lineup found.";
     } catch {
-      const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lineupIds, excludedIds });
+      const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lockIds, excludedIds });
       if (result.ok) picked = result;
       else failure = result.reason;
       note = FALLBACK_NOTE;
@@ -377,9 +400,12 @@ export default function LineupTab({
       setMessage((selectedTeams ? `${failure} Try selecting more games.` : (failure ?? "No lineup found.")) + note);
       return;
     }
-    setLineupIds(picked.players.map((p) => p.id));
+    setEditor(
+      picked.players.map((p) => p.id),
+      lockIds,
+    );
     const gamesUsed = new Set(picked.players.map((p) => gameOfTeam.get(p.team) ?? p.team)).size;
-    const kept = lineupIds.length ? ` Kept your ${lineupIds.length} pick${lineupIds.length > 1 ? "s" : ""}.` : "";
+    const kept = lockIds.length ? ` Kept your ${lockIds.length} locked player${lockIds.length > 1 ? "s" : ""}.` : "";
     const scope = selectedTeams ? ` from ${activeGames.length} selected games` : "";
     const stack = stacking && !note ? describeStack(picked.players, opponentOf, stackRules) : null;
     setMessage(
@@ -715,6 +741,15 @@ export default function LineupTab({
                   <span className="w-10 text-xs font-bold text-slate-500">{slot}</span>
                   {p ? (
                     <>
+                      <button
+                        onClick={() => toggleLock(p.id)}
+                        aria-pressed={lockIds.includes(p.id)}
+                        aria-label={`${lockIds.includes(p.id) ? "Unlock" : "Lock"} ${p.name}`}
+                        title={lockIds.includes(p.id) ? "Locked: in every optimized and built lineup. Click to unlock." : "Unlocked: the optimizer may replace him. Click to lock."}
+                        className={lockIds.includes(p.id) ? "text-amber-300 hover:text-amber-200" : "text-slate-600 hover:text-slate-300"}
+                      >
+                        <LockIcon locked={lockIds.includes(p.id)} />
+                      </button>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold">{p.name}</p>
                         <p className="text-xs text-slate-500">
@@ -733,6 +768,12 @@ export default function LineupTab({
             })}
           </ol>
 
+          {lineup.length > 0 && (
+            <p className="mt-2 text-[11px] text-slate-500">
+              <span className="text-amber-300">Locked</span> players stay in every optimized and built lineup; the rest can change. Click a lock to toggle.
+            </p>
+          )}
+
           {message && <p className="mt-4 rounded-xl bg-slate-800/70 px-3 py-2 text-sm text-slate-200">{message}</p>}
 
           <div className="mt-4 grid grid-cols-2 gap-2">
@@ -741,14 +782,14 @@ export default function LineupTab({
               disabled={busy !== null}
               className="col-span-2 rounded-full bg-emerald-400 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
             >
-              {busy === "optimize" ? "Optimizing…" : lineup.length > 0 ? "Optimize around picks" : "Optimize lineup"}
+              {busy === "optimize" ? "Optimizing…" : lockIds.length > 0 ? "Optimize around locked" : "Optimize lineup"}
             </button>
             <button onClick={exportLineup} className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold hover:border-slate-500">
               Export
             </button>
             <button
               onClick={() => {
-                setLineupIds([]);
+                setEditor([], []);
                 setMessage(null);
               }}
               className="rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold hover:border-slate-500"
@@ -876,8 +917,20 @@ export default function LineupTab({
           <div className="mt-6 border-t border-slate-800 pt-5">
             <h3 className="font-bold">Build multiple lineups</h3>
             <p className="mt-1 text-xs text-slate-500">
-              Lineup 1 is the optimal one; the rest vary players while staying strong. Players in the editor stay in every lineup.
+              Lineup 1 is the optimal one; the rest vary players while staying strong. Locked players are in every lineup; everyone else is
+              mixed.
             </p>
+            <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs">
+              {lockedPlayers.length ? (
+                <>
+                  <span className="text-slate-400">Locked in every lineup ({lockedPlayers.length}): </span>
+                  <span className="font-semibold text-amber-300">{lockedPlayers.map((p) => p.name).join(", ")}</span>
+                  <span className="text-slate-500"> · {ROSTER_SLOTS.length - lockedPlayers.length} spots vary</span>
+                </>
+              ) : (
+                <span className="text-slate-500">No players locked: all 9 spots vary. Add players with + to lock them in.</span>
+              )}
+            </div>
             <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
               <label className="flex flex-col gap-1 text-slate-400">
                 Lineups
@@ -976,7 +1029,7 @@ export default function LineupTab({
           rules={stackRules}
           showOwnership={hasOwnership}
           onLoad={(ids) => {
-            setLineupIds(ids);
+            setEditor(ids, lockIds);
             setMessage("Loaded into the editor.");
           }}
           onExport={exportBuilt}
@@ -985,6 +1038,15 @@ export default function LineupTab({
       )}
       <HoverCards hover={hover} teams={slate.teams} />
     </>
+  );
+}
+
+function LockIcon({ locked }: { locked: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+      <rect x="3" y="7" width="10" height="7" rx="1.5" fill={locked ? "currentColor" : "none"} />
+      <path d={locked ? "M5 7V5a3 3 0 0 1 6 0v2" : "M5 7V5a3 3 0 0 1 5.8-1"} strokeLinecap="round" />
+    </svg>
   );
 }
 
