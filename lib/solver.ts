@@ -1,6 +1,7 @@
 // Server-side only (used by /api/optimize): HiGHS loads its WebAssembly from node_modules.
 import loadHighs from "highs";
 import { isInactive } from "@/lib/dk-salaries";
+import { stoppedEarlyMessage } from "@/lib/optimizer";
 import { NO_RULES, type StackRules } from "@/lib/stack-rules";
 
 export { NO_RULES, type StackRules };
@@ -286,7 +287,7 @@ export async function solveLineups(req: MultiRequest): Promise<MultiResult> {
       warnings.push(
         lineups.length === 0
           ? result.reason
-          : `Built ${lineups.length} of ${req.count}: no other lineup meets the difference, exposure and stacking rules. Loosen a setting or select more games.`,
+          : stoppedEarlyMessage(lineups.length, req.count, locked.size, req.minUnique, "no other lineup meets the difference, exposure and stacking rules."),
       );
       break;
     }

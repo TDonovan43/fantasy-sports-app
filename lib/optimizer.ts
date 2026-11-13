@@ -5,6 +5,19 @@ import type { PoolPlayer, Position } from "@/lib/types";
 export const ROSTER_SLOTS = ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"] as const;
 export type Slot = (typeof ROSTER_SLOTS)[number];
 
+/**
+ * Why a multi-lineup build stopped after `built` lineups. Locked players are in every lineup, so
+ * when too many are locked no further lineup can differ by `minUnique` players: say that plainly.
+ */
+export function stoppedEarlyMessage(built: number, count: number, lockedCount: number, minUnique: number, general: string) {
+  const free = ROSTER_SLOTS.length - lockedCount;
+  if (lockedCount > 0 && free < minUnique) {
+    return `Built ${built} of ${count}: ${lockedCount} players are locked in, so only ${free} roster spot${free === 1 ? "" : "s"} can change, but each lineup must differ by ${minUnique}. Remove some players from the lineup editor (or lower "Min. different players").`;
+  }
+  const hint = lockedCount >= 5 ? ` You also have ${lockedCount} players locked in; removing some gives the builder more room.` : "";
+  return `Built ${built} of ${count}: ${general} Loosen a setting or select more games.${hint}`;
+}
+
 const FLEX_POSITIONS: Position[] = ["RB", "WR", "TE"];
 const BASE_COUNTS: Record<Position, number> = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 };
 const SALARY_UNIT = 100;
@@ -327,7 +340,7 @@ export function generateLineups(options: MultiLineupOptions): MultiLineupResult 
       warnings.push(
         lineups.length === 0
           ? lastReason || "Couldn't build a lineup with these settings."
-          : `Built ${lineups.length} of ${count}: no other lineup differs by ${minUnique}+ players within the ${Math.round(maxExposure * 100)}% exposure limit. Loosen a setting or select more games.`,
+          : stoppedEarlyMessage(lineups.length, count, locked.size, minUnique, `no other lineup differs by ${minUnique}+ players within the ${Math.round(maxExposure * 100)}% exposure limit.`),
       );
       break;
     }
