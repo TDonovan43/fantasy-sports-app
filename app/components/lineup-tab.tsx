@@ -1199,7 +1199,15 @@ function BuiltLineups({
                     <li key={`${slot}-${i}`} className="flex gap-2">
                       <span className="w-9 shrink-0 text-xs font-bold leading-5 text-slate-500">{slot}</span>
                       <span className="min-w-0 flex-1 truncate">{p?.name ?? "—"}</span>
-                      <span className="shrink-0 text-xs leading-5 text-slate-500">{p ? `${p.team} · ${money(p.salary)}` : ""}</span>
+                      <span className="shrink-0 text-xs leading-5 text-slate-500">
+                        {p ? (
+                          <>
+                            {p.team} <span className="text-slate-300">{p.opponent ? opponentLabel(p) : ""}</span> · {money(p.salary)}
+                          </>
+                        ) : (
+                          ""
+                        )}
+                      </span>
                     </li>
                   );
                 })}
