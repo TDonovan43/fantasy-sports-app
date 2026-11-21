@@ -75,21 +75,21 @@ const STAT_COLUMNS: Record<PositionFilter, Column[]> = {
   ],
 };
 
-/** FieldGoal's own projection (Proj may be ETR or a blend, depending on the Projections setting). */
+/** Stack Lab's own projection (Proj may be ETR or a blend, depending on the Projections setting). */
 const fieldgoalProj = (p: PoolPlayer) => p.fieldgoal?.projected ?? p.projected;
 const pctCol = (v: number) => `${v.toFixed(1)}%`;
 
-/** Columns that don't depend on FieldGoal's research data. */
+/** Columns that don't depend on Stack Lab's research data. */
 const ALWAYS_SHOWN = new Set(["salary", "etr", "etrCeil", "ownLarge", "ownSmall", "weather"]);
 
 /** Shown when ETR projections are loaded in this browser. */
 const ETR_COLUMNS: Column[] = [
-  { key: "fg", label: "FG", title: "FieldGoal's projection", value: (p) => (p.projected > 0 || p.fieldgoal ? fieldgoalProj(p) : null), format: fmt1 },
+  { key: "fg", label: "SL", title: "Stack Lab's projection", value: (p) => (p.projected > 0 || p.fieldgoal ? fieldgoalProj(p) : null), format: fmt1 },
   { key: "etr", label: "ETR", title: "Establish The Run's DraftKings projection", value: (p) => p.etr?.projected, format: fmt1 },
   {
     key: "diff",
     label: "Diff",
-    title: "ETR minus FieldGoal: positive means ETR is higher",
+    title: "ETR minus Stack Lab: positive means ETR is higher",
     value: (p) => (p.etr && (p.projected > 0 || p.fieldgoal) ? Math.round((p.etr.projected - fieldgoalProj(p)) * 10) / 10 : null),
     format: (v) => (v > 0 ? `+${v.toFixed(1)}` : v.toFixed(1)),
   },
@@ -166,7 +166,7 @@ export default function ResearchTab({
   const cutoffs = useMemo(() => volatilityCutoffs(slate.players), [slate.players]);
   const columns = useMemo(() => {
     if (!hasEtr) return [...BASE_COLUMNS, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
-    // Proj, then the FieldGoal vs ETR comparison, then the rest.
+    // Proj, then the Stack Lab vs ETR comparison, then the rest.
     const [salary, projected, ...rest] = BASE_COLUMNS;
     return [salary, projected, ...ETR_COLUMNS, ...rest, ...STAT_COLUMNS[position], ...FACTOR_COLUMNS];
   }, [position, hasEtr]);
@@ -193,7 +193,7 @@ export default function ResearchTab({
   if (!slate.players.some((p) => p.research)) {
     return (
       <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-8 text-center text-slate-400">
-        Projection inputs come from the FieldGoal model on nflverse data, which isn&apos;t the active source right now ({slate.source}).
+        Projection inputs come from the Stack Lab model on nflverse data, which isn&apos;t the active source right now ({slate.source}).
       </section>
     );
   }
@@ -347,7 +347,7 @@ export default function ResearchTab({
                         </td>
                       );
                     }
-                    // Players without FieldGoal research still show salary, projection and ETR's numbers.
+                    // Players without Stack Lab research still show salary, projection and ETR's numbers.
                     const blank = unprojected && !ALWAYS_SHOWN.has(c.key) && !(c.key === "projected" && p.projected > 0);
                     return (
                       <td key={c.key} className={`px-3 py-2 ${c.key === "projected" ? "font-bold text-emerald-300" : tone || "text-slate-300"}`}>

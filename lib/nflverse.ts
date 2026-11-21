@@ -5,7 +5,7 @@ import { round1, round2 } from "@/lib/model-utils";
 import type { GameLogEntry, Matchup, OffensePosition, PlayerResearch, PoolPlayer, Position, StarterOverride, TeamProfile } from "@/lib/types";
 
 /**
- * FieldGoal projection model built on nflverse data (https://github.com/nflverse/nflverse-data).
+ * Stack Lab projection model built on nflverse data (https://github.com/nflverse/nflverse-data).
  *
  * For each player: recency-weighted DraftKings points per game (current season, plus last season
  * at reduced weight), shrunk toward a salary-implied prior for small samples, then adjusted for
