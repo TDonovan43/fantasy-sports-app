@@ -126,7 +126,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
     }
   }, [baseSlate, upload]);
 
-  /** ETR numbers attached to the slate (FieldGoal projections unchanged). */
+  /** ETR numbers attached to the slate (Stack Lab projections unchanged). */
   const etr = useMemo(() => {
     if (!etrUpload) return null;
     try {
@@ -136,7 +136,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
     }
   }, [slate, etrUpload]);
 
-  /** The slate with projections from the chosen source (FieldGoal, ETR or a blend). */
+  /** The slate with projections from the chosen source (Stack Lab, ETR or a blend). */
   const sourced = useMemo(
     () => markHomeAway(withWeatherImpact(etr ? applyProjectionSource(etr.slate, projectionMode, etrWeight / 100, etr.complete) : slate)),
     [etr, slate, projectionMode, etrWeight],
@@ -248,10 +248,18 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <header className="mb-4 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-5">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-400 font-black text-slate-950">F</div>
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-400 text-slate-950" aria-hidden="true">
+              <svg viewBox="0 0 32 32" width="26" height="26">
+                <rect x="5" y="21" width="22" height="4.5" rx="2.25" fill="currentColor" />
+                <rect x="8" y="14" width="16" height="4.5" rx="2.25" fill="currentColor" opacity="0.8" />
+                <rect x="11" y="7" width="10" height="4.5" rx="2.25" fill="currentColor" opacity="0.6" />
+              </svg>
+            </div>
             <div>
-              <p className="text-[10px] uppercase tracking-[0.28em] text-emerald-300">DFS Research</p>
-              <h1 className="text-xl font-bold">FieldGoal</h1>
+              <p className="text-[10px] uppercase tracking-[0.28em] text-emerald-300">
+                NFL · DraftKings · {SLATE_OPTIONS.find((o) => o.id === slateFilter)?.label ?? "All games"}
+              </p>
+              <h1 className="text-xl font-bold">Stack Lab</h1>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -394,7 +402,7 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
             <span className="mr-1 text-xs uppercase tracking-[0.2em] text-slate-500">Projections</span>
             {(
               [
-                ["fieldgoal", "FieldGoal"],
+                ["fieldgoal", "Stack Lab"],
                 ["etr", "ETR"],
                 ["blend", "Blend"],
               ] as const
@@ -422,15 +430,15 @@ export default function Dashboard({ slate: initialSlate }: { slate: SlateData })
                   className="w-32 accent-violet-400"
                   aria-label="ETR weight in the blend"
                 />
-                {etrWeight}% ETR · {100 - etrWeight}% FieldGoal
+                {etrWeight}% ETR · {100 - etrWeight}% Stack Lab
               </label>
             )}
             <span className="text-xs text-slate-500">
               {projectionMode === "fieldgoal"
-                ? "Optimizer uses FieldGoal; ETR shown alongside."
+                ? "Optimizer uses Stack Lab; ETR shown alongside."
                 : projectionMode === "etr"
                   ? "Optimizer uses ETR's projections, floors and ceilings."
-                  : "Optimizer uses the blend; players ETR doesn't project keep FieldGoal's number."}
+                  : "Optimizer uses the blend; players ETR doesn't project keep Stack Lab's number."}
             </span>
           </div>
         )}

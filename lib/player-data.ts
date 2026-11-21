@@ -335,7 +335,7 @@ async function computeSlateData(options: SlateOptions = {}): Promise<SlateData> 
 // ---- Snapshot: the finished default slate, saved in the database --------------------------------
 
 /** Bump the suffix when the slate's shape changes, so new code never serves an old-shape snapshot. */
-const SNAPSHOT_ID = "current-v3"; // v2: research.gameLog, v3: research.stdDev
+const SNAPSHOT_ID = "current-v4"; // v2: research.gameLog, v3: research.stdDev, v4: Stack Lab notice text
 /** Served as-is while younger than this. */
 const SNAPSHOT_FRESH_MS = 15 * 60 * 1000;
 /** Older than this, a visitor waits for a fresh build instead of seeing stale data. */
@@ -487,7 +487,7 @@ export async function resolveSeasonWeek(): Promise<{ season: number; week: numbe
   return (await latestSyncedWeek()) ?? { season: new Date().getFullYear(), week: 1 };
 }
 
-/** Live slate projected by the FieldGoal model on nflverse data, or null if the data is unavailable. */
+/** Live slate projected by the Stack Lab model on nflverse data, or null if the data is unavailable. */
 export async function getNflverseSlate(options: SlateOptions = {}): Promise<SlateData | null> {
   try {
     const { season, week } = await resolveSeasonWeek();
@@ -505,7 +505,7 @@ export async function getNflverseSlate(options: SlateOptions = {}): Promise<Slat
     if (result.players.length === 0) return null;
 
     const notices = [
-      `Projections: FieldGoal model on nflverse stats through week ${result.throughWeek}. It uses recency-weighted DraftKings points, opponent and Vegas adjustments${stored ? ", and a salary prior for small samples" : ""}.`,
+      `Projections: Stack Lab model on nflverse stats through week ${result.throughWeek}. It uses recency-weighted DraftKings points, opponent and Vegas adjustments${stored ? ", and a salary prior for small samples" : ""}.`,
       result.hasLines
         ? "Spreads and totals come from the nflverse schedule."
         : "No betting lines are posted for this week yet, so projections use only the opponent adjustment.",

@@ -1,4 +1,4 @@
-# FieldGoal — DFS research
+# Stack Lab — NFL DFS research
 
 A Next.js 16 dashboard for DraftKings NFL Classic contests: a filterable player board, this week's matchups, and a lineup builder with an exact salary-cap optimizer.
 
@@ -27,7 +27,7 @@ Players listed **OUT** or **IR** (DraftKings status or the nflverse injury repor
 
 `getSlateData()` in `lib/player-data.ts` uses the first source that returns players:
 
-1. **FieldGoal model on nflverse data** (`lib/nflverse.ts`), the default. It's free, with no R or API key needed; it downloads the [nflverse-data](https://github.com/nflverse/nflverse-data) CSV releases. The current week also comes from the nflverse schedule (the first week with unplayed games).
+1. **Stack Lab model on nflverse data** (`lib/nflverse.ts`), the default. It's free, with no R or API key needed; it downloads the [nflverse-data](https://github.com/nflverse/nflverse-data) CSV releases. The current week also comes from the nflverse schedule (the first week with unplayed games).
    - **SportsDataIO** is used only when `PROJECTION_SOURCE=sportsdataio` (for a paid key). It is never called otherwise, and a trial key's scrambled data is never shown; the nflverse model is used instead.
 2. **`DFS_FEED_URL`**: any JSON feed of player rows. Common field names are detected automatically.
 3. **Database**: the last slate written by `/api/sync`.
@@ -54,7 +54,7 @@ Inputs: weekly player stats for this season and last, the schedule (with closing
 
 | | Avg error | Correlation |
 | --- | --- | --- |
-| FieldGoal model | 6.03 | 0.490 |
+| Stack Lab model | 6.03 | 0.490 |
 | Season average | 6.47 | 0.447 |
 | Last game | 7.83 | 0.325 |
 
@@ -65,9 +65,9 @@ The model only adjusts roles for QBs, so an RB or WR whose role changed recently
 **Upload ETR projections** in the header accepts ETR's DraftKings slate export (DK projection, floor, ceiling, small- and large-field projected ownership, DraftKings ids) or their weekly projections file (projection and ceiling). The file is parsed in your browser, saved there for the week, and never sent to the server, because ETR's content is paid and the site is public.
 
 - Players are matched by DraftKings id, then name and team, then name and position; defenses by team; "LA" is treated as "LAR".
-- **Projections** setting (under the tabs, once a file is loaded): **FieldGoal** (default), **ETR**, or **Blend** with an ETR weight slider. It sets the projection, floor and ceiling used by the player pool, Top value, Optimize and Build multiple lineups.
+- **Projections** setting (under the tabs, once a file is loaded): **Stack Lab** (default), **ETR**, or **Blend** with an ETR weight slider. It sets the projection, floor and ceiling used by the player pool, Top value, Optimize and Build multiple lineups.
 - The Lineup builder adds **ETR** and **Own** columns, ownership on the Top value cards, and total lineup ownership. The Projections tab adds FG, ETR, Diff (ETR − FG), ETR ceiling and both ownership numbers.
-- ETR's slate export lists every player on the slate, so players it leaves out (tagged "not in ETR") are usually not expected to play. They're dropped in ETR mode and kept with FieldGoal's projection in Blend mode. Players only ETR projects ("ETR only") join the pool in ETR and Blend modes.
+- ETR's slate export lists every player on the slate, so players it leaves out (tagged "not in ETR") are usually not expected to play. They're dropped in ETR mode and kept with Stack Lab's projection in Blend mode. Players only ETR projects ("ETR only") join the pool in ETR and Blend modes.
 - Because uploads stay in the browser, ETR projections aren't recorded for the Accuracy tab.
 
 ## DraftKings salaries

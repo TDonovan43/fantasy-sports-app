@@ -377,7 +377,7 @@ export default function LineupTab({
       downloadCsv(`DKUpload-week${slate.week}-${built.lineups.length}-lineups.csv`, dk);
       setMessage(`Downloaded ${built.lineups.length} lineups for DraftKings: Lineups → Upload Lineups.`);
     } else {
-      downloadCsv(`fieldgoal-week${slate.week}-${built.lineups.length}-lineups.csv`, lineupsToCsv(built.lineups));
+      downloadCsv(`stacklab-week${slate.week}-${built.lineups.length}-lineups.csv`, lineupsToCsv(built.lineups));
       setMessage("Downloaded a readable CSV. Upload your DKSalaries.csv to get a DraftKings upload file.");
     }
   }
@@ -434,7 +434,7 @@ export default function LineupTab({
       downloadCsv(`DKUpload-week${slate.week}.csv`, lineupToDraftKingsCsv(lineup));
       setMessage("Downloaded a DraftKings upload file. On DraftKings: Lineups → Upload Lineups.");
     } else {
-      downloadCsv(`fieldgoal-week${slate.week}-lineup.csv`, lineupToCsv(lineup));
+      downloadCsv(`stacklab-week${slate.week}-lineup.csv`, lineupToCsv(lineup));
       setMessage(
         lineup.length < ROSTER_SLOTS.length
           ? "Lineup isn't full, so this is a readable CSV. Fill every slot for a DraftKings upload file."
@@ -665,8 +665,8 @@ export default function LineupTab({
                           </span>
                         )}
                         {p.fieldgoal && (
-                          <span title="FieldGoal's own projection" className="block text-[10px] font-normal text-slate-500">
-                            FG {p.fieldgoal.projected.toFixed(1)}
+                          <span title="Stack Lab's own projection" className="block text-[10px] font-normal text-slate-500">
+                            SL {p.fieldgoal.projected.toFixed(1)}
                           </span>
                         )}
                       </td>

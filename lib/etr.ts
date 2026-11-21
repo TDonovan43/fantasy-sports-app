@@ -81,13 +81,13 @@ export type EtrMergeResult = {
   hasOwnership: boolean;
   /** True for ETR's DraftKings slate export, which lists every player on the slate (with DK ids). */
   complete: boolean;
-  /** Pool players with a FieldGoal projection of 5+ that ETR's file leaves out (likely ruled out). */
+  /** Pool players with a Stack Lab projection of 5+ that ETR's file leaves out (likely ruled out). */
   missing: PoolPlayer[];
 };
 
 /**
  * Attaches ETR numbers to the slate's players (and unprojected players), matching by DraftKings id,
- * then name + team, then name + position; defenses by team. FieldGoal numbers are left unchanged.
+ * then name + team, then name + position; defenses by team. Stack Lab numbers are left unchanged.
  */
 export function mergeEtr(slate: SlateData, rows: EtrRow[]): EtrMergeResult {
   const byId = new Map(rows.filter((r) => r.dkId).map((r) => [r.dkId!, r]));
@@ -123,8 +123,8 @@ export function mergeEtr(slate: SlateData, rows: EtrRow[]): EtrMergeResult {
 }
 
 /**
- * Sets each player's projection, floor and ceiling from the chosen source, keeping the FieldGoal
- * numbers in `fieldgoal`. Players without an ETR match keep FieldGoal's numbers, except in ETR mode
+ * Sets each player's projection, floor and ceiling from the chosen source, keeping the Stack Lab
+ * numbers in `fieldgoal`. Players without an ETR match keep Stack Lab's numbers, except in ETR mode
  * with a complete slate export, where they're left out (ETR omitting a player usually means he's out).
  * In ETR or Blend mode, unprojected players that ETR projects join the pool with ETR's numbers.
  */
@@ -135,7 +135,7 @@ export function applyProjectionSource(slate: SlateData, mode: ProjectionMode, et
   const switchSource = (p: PoolPlayer, fieldgoalHasProjection: boolean): PoolPlayer => {
     if (!p.etr) return p;
     const fieldgoal = { projected: p.projected, floor: p.floor, ceiling: p.ceiling };
-    // No FieldGoal projection: ETR's numbers are the only ones there are.
+    // No Stack Lab projection: ETR's numbers are the only ones there are.
     const weight = fieldgoalHasProjection ? w : 1;
     const blend = (fg: number, etr: number | null | undefined) =>
       etr === null || etr === undefined ? fg : round1(weight * etr + (1 - weight) * fg);

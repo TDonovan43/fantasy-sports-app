@@ -34,7 +34,7 @@ export type PoolPlayer = {
   isHome?: boolean;
   /** Estimated weather effect at kickoff, for awareness only (not applied to projections). */
   weatherImpact?: { pct: number; label: string; detail: string };
-  /** FieldGoal's own numbers, kept when the projection source is ETR or Blend. */
+  /** Stack Lab's own numbers, kept when the projection source is ETR or Blend. */
   fieldgoal?: { projected: number; floor: number; ceiling: number };
 };
 

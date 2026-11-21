@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "FieldGoal | DFS Research",
+  title: "Stack Lab | NFL DFS Research",
   description: "Daily fantasy football research dashboard for weekly projections and DraftKings salary analysis.",
 };
 

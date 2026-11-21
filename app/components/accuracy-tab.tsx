@@ -202,7 +202,7 @@ function MissChart({ weeks }: { weeks: WeekReport[] }) {
           <svg width="18" height="8" aria-hidden>
             <line x1="0" y1="4" x2="18" y2="4" stroke={MODEL_COLOR} strokeWidth="2" />
           </svg>
-          FieldGoal model
+          Stack Lab model
         </span>
         <span className="flex items-center gap-2">
           <svg width="18" height="8" aria-hidden>
