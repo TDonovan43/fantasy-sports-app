@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { HoverCards, useHoverCards } from "@/app/components/hover-cards";
 import { isInactive } from "@/lib/dk-salaries";
 import { OWNERSHIP_TARGET, isOwnershipMode, type OwnershipMode } from "@/lib/ownership-weighting";
@@ -39,6 +39,10 @@ function sortValue(p: PoolPlayer, key: Exclude<SortKey, "name">) {
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
 
 const POSITION_FILTERS: PositionFilter[] = ["ALL", "QB", "RB", "WR", "TE", "FLEX", "DST"];
+const POOL_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
+/** Players a DK Classic lineup needs at each position, before the FLEX. */
+const ROSTER_NEEDS: Record<Position, number> = { QB: 1, RB: 2, WR: 3, TE: 1, DST: 1 };
+const FLEX_POSITIONS: Position[] = ["RB", "WR", "TE"];
 const PAGE_SIZE = 50;
 const TOP_VALUE_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
 const RANDOMNESS = { none: 0, low: 0.25, medium: 0.5, high: 1 } as const;
@@ -87,6 +91,10 @@ export default function LineupTab({
   const [lineupIds, setLineupIds] = useState<string[]>([]);
   /** Editor players kept in every optimized/built lineup. Players you add are locked; ones the optimizer fills in aren't. */
   const [lockIds, setLockIds] = useState<string[]>([]);
+  /** Player pool: positions with picks only use those players in Optimize and Build; the rest use everyone. */
+  const [poolIds, setPoolIds] = useState<string[]>([]);
+  const [poolOnly, setPoolOnly] = useState(false);
+  const poolKey = `fieldgoal-pool-${slate.season}-${slate.week}`;
   const [excludedIds, setExcludedIds] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [multiCount, setMultiCount] = useState(5);
@@ -113,6 +121,40 @@ export default function LineupTab({
   );
   const lineup = useMemo(() => lineupIds.map((id) => byId.get(id)).filter((p): p is PoolPlayer => !!p), [lineupIds, byId]);
   const lockedPlayers = lineup.filter((p) => lockIds.includes(p.id));
+
+  // The pool is saved in this browser for the week.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(poolKey);
+      setPoolIds(saved ? (JSON.parse(saved) as string[]) : []);
+    } catch {
+      // Storage unavailable: the pool just won't persist.
+    }
+  }, [poolKey]);
+
+  function savePool(ids: string[]) {
+    setPoolIds(ids);
+    try {
+      if (ids.length) localStorage.setItem(poolKey, JSON.stringify(ids));
+      else localStorage.removeItem(poolKey);
+    } catch {
+      // Storage unavailable.
+    }
+  }
+
+  function togglePool(id: string) {
+    savePool(poolIds.includes(id) ? poolIds.filter((x) => x !== id) : [...poolIds, id]);
+  }
+
+  /** Pool picks by position (players still in this slate). */
+  const poolByPosition = useMemo(() => {
+    const map = new Map<Position, PoolPlayer[]>();
+    for (const id of poolIds) {
+      const p = byId.get(id);
+      if (p) map.set(p.position, [...(map.get(p.position) ?? []), p]);
+    }
+    return map;
+  }, [poolIds, byId]);
   const slots = assignSlots(lineup) ?? ROSTER_SLOTS.map(() => null);
   const salaryUsed = lineupSalary(lineup);
   const remaining = slate.salaryCap - salaryUsed;
@@ -170,12 +212,13 @@ export default function LineupTab({
       if (position === "FLEX" ? !["RB", "WR", "TE"].includes(p.position) : position !== "ALL" && p.position !== position) return false;
       if (selectedTeams && !selectedTeams.has(p.team)) return false;
       if (q && !p.name.toLowerCase().includes(q) && !p.team.toLowerCase().includes(q)) return false;
+      if (poolOnly && !poolIds.includes(p.id)) return false;
       return true;
     });
     const dir = sort.desc ? -1 : 1;
     const key = sort.key;
     return rows.sort((a, b) => (key === "name" ? a.name.localeCompare(b.name) : sortValue(a, key) - sortValue(b, key)) * dir);
-  }, [pool, position, selectedTeams, query, sort]);
+  }, [pool, position, selectedTeams, query, sort, poolOnly, poolIds]);
 
   function resetPaging<T>(fn: (v: T) => void) {
     return (v: T) => {
@@ -269,7 +312,44 @@ export default function LineupTab({
   /** Players the optimizer may use: the selected games (or all), plus anyone already in the lineup. */
   function optimizerPool() {
     const everyone = [...slate.players, ...(slate.unprojected ?? [])];
-    return selectedTeams ? everyone.filter((p) => selectedTeams.has(p.team) || lockIds.includes(p.id)) : everyone;
+    return everyone.filter(
+      (p) =>
+        lockIds.includes(p.id) ||
+        ((!selectedTeams || selectedTeams.has(p.team)) && (!poolByPosition.has(p.position) || poolIds.includes(p.id))),
+    );
+  }
+
+  /** Why the player pool can't fill a lineup, or null if it can. */
+  function poolShortfall(): string | null {
+    if (!poolByPosition.size) return null;
+    const usable = optimizerPool().filter(
+      (p) => lockIds.includes(p.id) || (p.salary > 0 && p.projected > 0 && !isInactive(p.injury) && !excludedIds.includes(p.id)),
+    );
+    const count = (pos: Position) => usable.filter((p) => p.position === pos).length;
+    const short = POOL_POSITIONS.filter((pos) => poolByPosition.has(pos) && count(pos) < ROSTER_NEEDS[pos]).map(
+      (pos) => `${pos} needs ${ROSTER_NEEDS[pos]}, pool has ${count(pos)}`,
+    );
+    if (short.length) return `Your player pool can't fill a lineup: ${short.join("; ")}. Add players or clear that position.`;
+    if (FLEX_POSITIONS.every((pos) => poolByPosition.has(pos))) {
+      const flexTotal = FLEX_POSITIONS.reduce((n, pos) => n + count(pos), 0);
+      if (flexTotal < 7) return `Your player pool can't fill the FLEX: RB + WR + TE picks total ${flexTotal}, a lineup needs 7.`;
+    }
+    // Cheapest lineup the pool allows (locked players first, then the cheapest at each spot, then the FLEX).
+    const leftovers: PoolPlayer[] = [];
+    let cheapest = 0;
+    for (const pos of POOL_POSITIONS) {
+      const ranked = usable
+        .filter((p) => p.position === pos)
+        .sort((a, b) => Number(lockIds.includes(b.id)) - Number(lockIds.includes(a.id)) || a.salary - b.salary);
+      cheapest += ranked.slice(0, ROSTER_NEEDS[pos]).reduce((sum, p) => sum + p.salary, 0);
+      if (FLEX_POSITIONS.includes(pos)) leftovers.push(...ranked.slice(ROSTER_NEEDS[pos]));
+    }
+    leftovers.sort((a, b) => Number(lockIds.includes(b.id)) - Number(lockIds.includes(a.id)) || a.salary - b.salary);
+    cheapest += leftovers[0]?.salary ?? 0;
+    if (cheapest > slate.salaryCap) {
+      return `Your player pool is too expensive: its cheapest possible lineup costs ${money(cheapest)}, over the ${money(slate.salaryCap)} cap. Add some cheaper players.`;
+    }
+    return null;
   }
 
   type SolverResponse = { lineups: { ids: string[]; salary: number; projected: number }[]; exposure: Record<string, number>; warnings: string[] };
@@ -311,6 +391,11 @@ export default function LineupTab({
   async function buildLineups() {
     if (selectedTeams && activeGames.length < 2) {
       setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
+      return;
+    }
+    const shortfall = poolShortfall();
+    if (shortfall) {
+      setMessage(shortfall);
       return;
     }
     const count = Math.min(MAX_LINEUPS, Math.max(1, Math.round(multiCount)));
@@ -385,6 +470,11 @@ export default function LineupTab({
   async function runOptimizer() {
     if (selectedTeams && activeGames.length < 2) {
       setMessage("Select at least 2 games: DraftKings Classic lineups need players from 2 or more games.");
+      return;
+    }
+    const shortfall = poolShortfall();
+    if (shortfall) {
+      setMessage(shortfall);
       return;
     }
     // Unprojected players are only used if you've added them yourself (they're locked in).
@@ -584,6 +674,16 @@ export default function LineupTab({
                 {pos}
               </button>
             ))}
+            <button
+              onClick={() => resetPaging(setPoolOnly)(!poolOnly)}
+              aria-pressed={poolOnly}
+              title="Show only players in your player pool"
+              className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${
+                poolOnly ? "border-sky-400 bg-sky-400 text-slate-950" : "border-slate-700 text-sky-300 hover:border-sky-400"
+              }`}
+            >
+              Pool only ({poolIds.filter((id) => byId.has(id)).length})
+            </button>
             <span className="ml-auto self-center text-xs text-slate-500">{filtered.length} shown</span>
           </div>
 
@@ -592,6 +692,9 @@ export default function LineupTab({
               <thead className="bg-slate-950/80 text-xs text-slate-400">
                 <tr>
                   <th className="px-3 py-3" />
+                  <th className="px-1 py-3 uppercase tracking-[0.18em]" title="Player pool: positions with picks only use those players when building">
+                    Pool
+                  </th>
                   {sortHeader("name", "Player")}
                   <th className="px-3 py-3 uppercase tracking-[0.18em]">Matchup</th>
                   {sortHeader("salary", "Salary")}
@@ -621,6 +724,16 @@ export default function LineupTab({
                         >
                           {inLineup ? "✓" : "+"}
                         </button>
+                      </td>
+                      <td className="px-1 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={poolIds.includes(p.id)}
+                          onChange={() => togglePool(p.id)}
+                          disabled={excluded}
+                          aria-label={`${poolIds.includes(p.id) ? "Remove" : "Add"} ${p.name} ${poolIds.includes(p.id) ? "from" : "to"} the player pool`}
+                          className="h-4 w-4 cursor-pointer accent-sky-400"
+                        />
                       </td>
                       <td className="px-3 py-2">
                         <button
@@ -928,6 +1041,40 @@ export default function LineupTab({
                 </>
               ) : (
                 <span className="text-slate-500">No players locked: all 9 spots vary. Add players with + to lock them in.</span>
+              )}
+            </div>
+            <div className="mt-2 rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-slate-400">Player pool</span>
+                {poolIds.length > 0 && (
+                  <button onClick={() => savePool([])} className="text-sky-300 hover:text-white">
+                    Clear pool
+                  </button>
+                )}
+              </div>
+              {poolByPosition.size ? (
+                <>
+                  <ul className="mt-1 space-y-0.5">
+                    {POOL_POSITIONS.map((pos) => {
+                      const picks = poolByPosition.get(pos);
+                      return (
+                        <li key={pos} className="flex gap-2">
+                          <span className="w-8 shrink-0 font-bold text-slate-500">{pos}</span>
+                          {picks ? (
+                            <span className={picks.length < ROSTER_NEEDS[pos] ? "text-rose-300" : "text-sky-300"}>
+                              {picks.length}: {picks.map((p) => p.name).join(", ")}
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">any player</span>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="mt-1 text-slate-500">Optimize and Build only use these players at positions with picks.</p>
+                </>
+              ) : (
+                <p className="mt-1 text-slate-500">Check players in the Pool column to limit a position to your picks.</p>
               )}
             </div>
             <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
