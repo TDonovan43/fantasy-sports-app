@@ -5,6 +5,7 @@ import { HoverCards, useHoverCards } from "@/app/components/hover-cards";
 import { isInactive } from "@/lib/dk-salaries";
 import { OWNERSHIP_TARGET, isOwnershipMode, type OwnershipMode } from "@/lib/ownership-weighting";
 import { formatKickoff, formatLine, impliedTotals, money, opponentLabel } from "@/lib/format";
+import { SCORING_TARGETS, SCORING_TARGET_LABEL, isScoringTarget, targetPoints, type ScoringTarget } from "@/lib/scoring-target";
 import { DEFAULT_STACK_RULES, NO_RULES, describeStack, type StackRules } from "@/lib/stack-rules";
 import {
   ROSTER_SLOTS,
@@ -58,6 +59,65 @@ const PAGE_SIZE = 50;
 const TOP_VALUE_POSITIONS: Position[] = ["QB", "RB", "WR", "TE", "DST"];
 const RANDOMNESS = { none: 0, low: 0.25, medium: 0.5, high: 1 } as const;
 type Randomness = keyof typeof RANDOMNESS;
+
+type ContestType = "large" | "small" | "cash";
+/** Starting settings for each kind of contest (rules of thumb; every value stays editable). */
+const CONTEST_PRESETS: Record<
+  ContestType,
+  {
+    label: string;
+    blurb: string;
+    target: ScoringTarget;
+    ownField: OwnField;
+    ownershipMode: OwnershipMode | null;
+    stack: Pick<StackRules, "qbStack" | "bringBack" | "maxPerTeam">;
+    randomness: Randomness;
+    count: number;
+    minUnique: number;
+    maxExposurePct: number;
+    maxStackExposurePct: number;
+  }
+> = {
+  large: {
+    label: "Large-field GPP (top-heavy)",
+    blurb: "Chase a rare, high score: ceiling projections, QB + 2 with a bring-back, chalk underweighted, lots of variety.",
+    target: "ceiling",
+    ownField: "large",
+    ownershipMode: "under",
+    stack: { qbStack: 2, bringBack: 1, maxPerTeam: 4 },
+    randomness: "high",
+    count: 20,
+    minUnique: 3,
+    maxExposurePct: 40,
+    maxStackExposurePct: 25,
+  },
+  small: {
+    label: "Small-field GPP (top-heavy)",
+    blurb: "A high score with a few pivots: some upside, QB + 1, ownership in line with the small field.",
+    target: "upside",
+    ownField: "small",
+    ownershipMode: "match",
+    stack: { qbStack: 1, bringBack: 0, maxPerTeam: 4 },
+    randomness: "medium",
+    count: 5,
+    minUnique: 2,
+    maxExposurePct: 60,
+    maxStackExposurePct: 60,
+  },
+  cash: {
+    label: "Cash: 50/50, double-up, head-to-head",
+    blurb: "Beat half the field: floor projections, no forced stack, chalk is fine, one best lineup.",
+    target: "floor",
+    ownField: "small",
+    ownershipMode: null,
+    stack: { qbStack: 0, bringBack: 0, maxPerTeam: 3 },
+    randomness: "none",
+    count: 1,
+    minUnique: 1,
+    maxExposurePct: 100,
+    maxStackExposurePct: 100,
+  },
+};
 const MAX_LINEUPS = 50;
 
 export function StartButton({ marked, pending, onClick }: { marked: boolean; pending: boolean; onClick: () => void }) {
@@ -119,6 +179,10 @@ export default function LineupTab({
   const [twoTeShare, setTwoTeShare] = useState<number | null>(null);
   const [ownershipMode, setOwnershipMode] = useState<OwnershipMode | null>(null);
   const [ownFieldChoice, setOwnFieldChoice] = useState<OwnField>("large");
+  /** What Optimize and Build maximize. */
+  const [target, setTarget] = useState<ScoringTarget>("median");
+  /** The last contest preset applied (settings may have been changed since). */
+  const [contestType, setContestType] = useState<ContestType | null>(null);
   const [busy, setBusy] = useState<null | "optimize" | "build">(null);
   const { hover, bind } = useHoverCards();
 
@@ -332,6 +396,21 @@ export default function LineupTab({
   const stacking = stackRules.qbStack > 0;
   const rulesOff = !stacking && stackRules.bringBack === 0 && !stackRules.avoidVsDst && stackRules.maxPerTeam >= 9;
 
+  function applyContest(type: ContestType | null) {
+    setContestType(type);
+    if (!type) return;
+    const p = CONTEST_PRESETS[type];
+    setTarget(p.target);
+    chooseOwnField(p.ownField);
+    setOwnershipMode(p.ownershipMode);
+    setStackRules((r) => ({ ...r, ...p.stack, avoidVsDst: true }));
+    setRandomness(p.randomness);
+    setMultiCount(p.count);
+    setMinUnique(p.minUnique);
+    setMaxExposurePct(p.maxExposurePct);
+    setMaxStackExposurePct(p.maxStackExposurePct);
+  }
+
   function setRule<K extends keyof StackRules>(key: K, value: StackRules[K]) {
     setStackRules((r) => ({ ...r, [key]: value }));
   }
@@ -412,6 +491,7 @@ export default function LineupTab({
         lockedIds: lockIds,
         excludedIds,
         rules: stackRules,
+        target,
         ...extra,
       }),
     });
@@ -449,6 +529,7 @@ export default function LineupTab({
       randomness: RANDOMNESS[randomness],
       // A new seed each click, so "Build" again gives a different set.
       seed: Math.floor(Math.random() * 2 ** 31),
+      target,
       ...(ownershipMode && hasOwnership
         ? {
             ownershipMode,
@@ -527,8 +608,16 @@ export default function LineupTab({
       if (l) picked = { players: toPlayers(l.ids), salary: l.salary, projected: l.projected };
       else failure = r.warnings.at(0) ?? "No lineup found.";
     } catch {
-      const result = optimizeLineup({ pool: optimizerPool(), salaryCap: slate.salaryCap, lockedIds: lockIds, excludedIds });
-      if (result.ok) picked = result;
+      const result = optimizeLineup({
+        pool: optimizerPool().map((p) => ({ ...p, projected: targetPoints(p, target) })),
+        salaryCap: slate.salaryCap,
+        lockedIds: lockIds,
+        excludedIds,
+      });
+      if (result.ok) {
+        const players = toPlayers(result.players.map((p) => p.id));
+        picked = { players, salary: result.salary, projected: lineupProjection(players) };
+      }
       else failure = result.reason;
       note = FALLBACK_NOTE;
     } finally {
@@ -955,6 +1044,46 @@ export default function LineupTab({
             </button>
           </div>
           {!hasDst && <p className="mt-3 text-xs text-slate-500">Optimizer holds back $3,000 for a defense.</p>}
+
+          <div className="mt-6 border-t border-slate-800 pt-5">
+            <h3 className="font-bold">Contest type</h3>
+            <p className="mt-1 text-xs text-slate-500">Fills in the settings below for the kind of contest. Change any of them afterward.</p>
+            <div className="mt-3 grid grid-cols-1 gap-3 text-xs">
+              <label className="flex flex-col gap-1 text-slate-400">
+                Preset
+                <select
+                  value={contestType ?? "custom"}
+                  onChange={(e) => applyContest(e.target.value === "custom" ? null : (e.target.value as ContestType))}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  <option value="custom">Custom (my own settings)</option>
+                  {(Object.keys(CONTEST_PRESETS) as ContestType[]).map((type) => (
+                    <option key={type} value={type}>
+                      {CONTEST_PRESETS[type].label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {contestType && <p className="text-sky-300">{CONTEST_PRESETS[contestType].blurb}</p>}
+              <label
+                className="flex flex-col gap-1 text-slate-400"
+                title="What Optimize and Build maximize. Lineup totals always show the plain projection."
+              >
+                Optimize for
+                <select
+                  value={target}
+                  onChange={(e) => isScoringTarget(e.target.value) && setTarget(e.target.value)}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-400"
+                >
+                  {SCORING_TARGETS.map((t) => (
+                    <option key={t} value={t}>
+                      {SCORING_TARGET_LABEL[t]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
 
           <div className="mt-6 border-t border-slate-800 pt-5">
             <div className="flex items-baseline justify-between gap-2">

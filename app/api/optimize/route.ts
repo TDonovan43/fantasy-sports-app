@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isOwnershipMode } from "@/lib/ownership-weighting";
+import { isScoringTarget } from "@/lib/scoring-target";
 import { solveLineup, solveLineups, type SolverPlayer } from "@/lib/solver";
 import { NO_RULES, type StackRules } from "@/lib/stack-rules";
 import type { Position } from "@/lib/types";
@@ -65,7 +66,7 @@ function parseRules(raw: unknown): StackRules {
 /**
  * Solves one lineup, or several (`count` > 1), with the stacking and diversity rules.
  * Body: { players, games, salaryCap, lockedIds, excludedIds, rules, count, minUnique, maxExposure,
- *         maxStackExposure, randomness, seed, ownership, ownershipMode }. Returns player ids per lineup.
+ *         maxStackExposure, randomness, seed, ownership, ownershipMode, target }. Returns player ids per lineup.
  */
 export async function POST(request: NextRequest) {
   let body: Record<string, unknown>;
@@ -88,6 +89,7 @@ export async function POST(request: NextRequest) {
     lockedIds: ids(body.lockedIds),
     excludedIds: ids(body.excludedIds),
     rules: parseRules(body.rules),
+    target: isScoringTarget(body.target) ? body.target : null,
   };
 
   const count = clamp(Math.round(num(body.count, 1)), 1, MAX_LINEUPS);
