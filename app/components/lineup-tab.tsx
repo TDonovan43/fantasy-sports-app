@@ -25,15 +25,26 @@ import type { PoolPlayer, Position, SlateData } from "@/lib/types";
 
 type SortKey = "name" | "salary" | "projected" | "floor" | "ceiling" | "value" | "etr" | "own";
 
-/** Sum of ETR projected ownership (large field) across a lineup, in %. */
-function totalOwnership(players: PoolPlayer[]) {
-  return players.reduce((sum, p) => sum + (p.etr?.ownLarge ?? 0), 0);
+/** Which ETR ownership projection to use: large-field GPPs or small-field contests. */
+type OwnField = "large" | "small";
+const OWN_FIELD_KEY = "fieldgoal-own-field";
+const OWN_FIELD_LABEL: Record<OwnField, string> = { large: "large field", small: "small field" };
+
+/** ETR projected ownership (%) for the chosen field, or null if ETR has none. */
+function ownOf(p: PoolPlayer, field: OwnField): number | null {
+  const v = field === "small" ? p.etr?.ownSmall : p.etr?.ownLarge;
+  return typeof v === "number" ? v : null;
+}
+
+/** Sum of ETR projected ownership across a lineup, in %. */
+function totalOwnership(players: PoolPlayer[], field: OwnField) {
+  return players.reduce((sum, p) => sum + (ownOf(p, field) ?? 0), 0);
 }
 
 /** Sort value for a column (ETR columns sort players without ETR data last). */
-function sortValue(p: PoolPlayer, key: Exclude<SortKey, "name">) {
+function sortValue(p: PoolPlayer, key: Exclude<SortKey, "name">, field: OwnField) {
   if (key === "etr") return p.etr?.projected ?? -1;
-  if (key === "own") return p.etr?.ownLarge ?? -1;
+  if (key === "own") return ownOf(p, field) ?? -1;
   return p[key];
 }
 type PositionFilter = "ALL" | "QB" | "RB" | "WR" | "TE" | "FLEX" | "DST";
@@ -101,12 +112,13 @@ export default function LineupTab({
   const [minUnique, setMinUnique] = useState(2);
   const [maxExposurePct, setMaxExposurePct] = useState(60);
   const [randomness, setRandomness] = useState<Randomness>("medium");
-  const [built, setBuilt] = useState<(MultiLineupResult & { ownershipMode: OwnershipMode | null }) | null>(null);
+  const [built, setBuilt] = useState<(MultiLineupResult & { ownershipMode: OwnershipMode | null; ownField: OwnField }) | null>(null);
   const [stackRules, setStackRules] = useState<StackRules>(DEFAULT_STACK_RULES);
   const [maxStackExposurePct, setMaxStackExposurePct] = useState(40);
   /** Share of built lineups with 2 TEs (a TE in the FLEX); null = the optimizer decides. */
   const [twoTeShare, setTwoTeShare] = useState<number | null>(null);
   const [ownershipMode, setOwnershipMode] = useState<OwnershipMode | null>(null);
+  const [ownFieldChoice, setOwnFieldChoice] = useState<OwnField>("large");
   const [busy, setBusy] = useState<null | "optimize" | "build">(null);
   const { hover, bind } = useHoverCards();
 
@@ -121,6 +133,25 @@ export default function LineupTab({
   );
   const lineup = useMemo(() => lineupIds.map((id) => byId.get(id)).filter((p): p is PoolPlayer => !!p), [lineupIds, byId]);
   const lockedPlayers = lineup.filter((p) => lockIds.includes(p.id));
+
+  // The ownership field choice is remembered in this browser.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(OWN_FIELD_KEY);
+      if (saved === "small") setOwnFieldChoice("small");
+    } catch {
+      // Storage unavailable: default to large field.
+    }
+  }, []);
+
+  function chooseOwnField(field: OwnField) {
+    setOwnFieldChoice(field);
+    try {
+      localStorage.setItem(OWN_FIELD_KEY, field);
+    } catch {
+      // Storage unavailable.
+    }
+  }
 
   // The pool is saved in this browser for the week.
   useEffect(() => {
@@ -162,7 +193,11 @@ export default function LineupTab({
   const hasDst = slate.players.some((p) => p.position === "DST");
   /** ETR projections were uploaded in this browser. */
   const hasEtr = slate.players.some((p) => p.etr);
-  const hasOwnership = slate.players.some((p) => p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined);
+  const hasLargeOwn = slate.players.some((p) => ownOf(p, "large") !== null);
+  const hasSmallOwn = slate.players.some((p) => ownOf(p, "small") !== null);
+  const hasOwnership = hasLargeOwn || hasSmallOwn;
+  /** The field actually used: the chosen one if ETR has it, else whichever it has. */
+  const ownField: OwnField = ownFieldChoice === "small" ? (hasSmallOwn ? "small" : "large") : hasLargeOwn ? "large" : "small";
 
   /** Selected games still in this slate (the DK slate selector can remove some). */
   const activeGames = useMemo(() => slate.games.filter((g) => selectedGameIds.includes(g.id)), [slate.games, selectedGameIds]);
@@ -217,8 +252,8 @@ export default function LineupTab({
     });
     const dir = sort.desc ? -1 : 1;
     const key = sort.key;
-    return rows.sort((a, b) => (key === "name" ? a.name.localeCompare(b.name) : sortValue(a, key) - sortValue(b, key)) * dir);
-  }, [pool, position, selectedTeams, query, sort, poolOnly, poolIds]);
+    return rows.sort((a, b) => (key === "name" ? a.name.localeCompare(b.name) : sortValue(a, key, ownField) - sortValue(b, key, ownField)) * dir);
+  }, [pool, position, selectedTeams, query, sort, poolOnly, poolIds, ownField]);
 
   function resetPaging<T>(fn: (v: T) => void) {
     return (v: T) => {
@@ -418,7 +453,10 @@ export default function LineupTab({
         ? {
             ownershipMode,
             ownership: Object.fromEntries(
-              optimizerPool().flatMap((p) => (typeof p.etr?.ownLarge === "number" ? [[p.id, p.etr.ownLarge / 100]] : [])),
+              optimizerPool().flatMap((p) => {
+                const own = ownOf(p, ownField);
+                return own === null ? [] : [[p.id, own / 100]];
+              }),
             ) as Record<string, number>,
           }
         : {}),
@@ -447,7 +485,7 @@ export default function LineupTab({
     } finally {
       setBusy(null);
     }
-    setBuilt({ ...result, ownershipMode: settings.ownershipMode ?? null });
+    setBuilt({ ...result, ownershipMode: settings.ownershipMode ?? null, ownField });
     setMessage(
       result.lineups.length
         ? `Built ${result.lineups.length} lineup${result.lineups.length > 1 ? "s" : ""}${lockIds.length ? ` around your ${lockIds.length} locked player${lockIds.length > 1 ? "s" : ""}` : ""}. See them below the player pool.${note}`
@@ -626,9 +664,9 @@ export default function LineupTab({
                       <span className="text-xl font-black text-amber-300">{p.value.toFixed(2)}x</span>
                       <span className="text-xs text-emerald-300">{p.projected.toFixed(1)} pts</span>
                     </p>
-                    {p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined && (
-                      <p className="text-[11px] text-slate-500" title="ETR projected ownership, large-field contests">
-                        Own {p.etr.ownLarge.toFixed(1)}%
+                    {ownOf(p, ownField) !== null && (
+                      <p className="text-[11px] text-slate-500" title={`ETR projected ownership, ${OWN_FIELD_LABEL[ownField]}`}>
+                        Own {ownOf(p, ownField)!.toFixed(1)}%
                       </p>
                     )}
                     <button
@@ -700,7 +738,7 @@ export default function LineupTab({
                   {sortHeader("salary", "Salary")}
                   {sortHeader("projected", "Proj")}
                   {hasEtr && sortHeader("etr", "ETR")}
-                  {hasOwnership && sortHeader("own", "Own")}
+                  {hasOwnership && sortHeader("own", ownField === "small" ? "Own SF" : "Own LF")}
                   {sortHeader("floor", "Floor")}
                   {sortHeader("ceiling", "Ceil")}
                   {sortHeader("value", "Value")}
@@ -785,8 +823,15 @@ export default function LineupTab({
                       </td>
                       {hasEtr && <td className="px-3 py-2 text-violet-200">{p.etr ? p.etr.projected.toFixed(1) : "—"}</td>}
                       {hasOwnership && (
-                        <td className="px-3 py-2 text-slate-300" title={p.etr?.ownSmall !== null && p.etr?.ownSmall !== undefined ? `Small field: ${p.etr.ownSmall.toFixed(1)}%` : undefined}>
-                          {p.etr?.ownLarge !== null && p.etr?.ownLarge !== undefined ? `${p.etr.ownLarge.toFixed(1)}%` : "—"}
+                        <td
+                          className="px-3 py-2 text-slate-300"
+                          title={(() => {
+                            const other: OwnField = ownField === "small" ? "large" : "small";
+                            const v = ownOf(p, other);
+                            return v === null ? undefined : `${other === "small" ? "Small" : "Large"} field: ${v.toFixed(1)}%`;
+                          })()}
+                        >
+                          {ownOf(p, ownField) !== null ? `${ownOf(p, ownField)!.toFixed(1)}%` : "—"}
                         </td>
                       )}
                       <td className="px-3 py-2 text-slate-400">{p.floor.toFixed(1)}</td>
@@ -829,8 +874,8 @@ export default function LineupTab({
             <span className="font-bold text-emerald-300">
               {lineupProjection(lineup).toFixed(1)} pts
               {hasOwnership && lineup.length > 0 && (
-                <span className="ml-2 text-xs font-normal text-slate-400" title="Sum of ETR projected ownership (large field)">
-                  Own {totalOwnership(lineup).toFixed(0)}%
+                <span className="ml-2 text-xs font-normal text-slate-400" title={`Sum of ETR projected ownership (${OWN_FIELD_LABEL[ownField]})`}>
+                  Own {totalOwnership(lineup, ownField).toFixed(0)}%
                 </span>
               )}
             </span>
@@ -1126,9 +1171,45 @@ export default function LineupTab({
                 </select>
               </label>
               {hasOwnership && (
+                <div className="col-span-2 flex flex-col gap-1 text-slate-400">
+                  <span title="Which ETR ownership projection the Own column, Ownership vs. field, exposure chips and lineup totals use">
+                    Ownership projection
+                  </span>
+                  <div className="grid grid-cols-2 gap-1" role="group" aria-label="Ownership projection">
+                    {(["large", "small"] as const).map((field) => {
+                      const available = field === "small" ? hasSmallOwn : hasLargeOwn;
+                      const active = ownField === field;
+                      return (
+                        <button
+                          key={field}
+                          type="button"
+                          onClick={() => chooseOwnField(field)}
+                          disabled={!available}
+                          aria-pressed={active}
+                          title={
+                            available
+                              ? field === "small"
+                                ? "Small-field contests: cash games, single-entry and small GPPs"
+                                : "Large-field GPPs (thousands of entries)"
+                              : "Not in your ETR upload"
+                          }
+                          className={`rounded-lg border px-2 py-1.5 text-xs font-semibold ${
+                            active
+                              ? "border-emerald-400 bg-emerald-400 text-slate-950"
+                              : "border-slate-700 text-slate-300 hover:border-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
+                          }`}
+                        >
+                          {field === "small" ? "Small field" : "Large field"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {hasOwnership && (
                 <label
                   className="col-span-2 flex flex-col gap-1 text-slate-400"
-                  title="Your exposure to each chalk player (ETR projected 10%+ owned, large field) compared with the field. Lower-owned players are left to the optimizer, and Max exposure % still applies."
+                  title="Your exposure to each chalk player (ETR projected 10%+ owned, in the ownership projection chosen above) compared with the field. Lower-owned players are left to the optimizer, and Max exposure % still applies."
                 >
                   Ownership vs. field
                   <select
@@ -1193,6 +1274,7 @@ export default function LineupTab({
           rules={stackRules}
           showOwnership={hasOwnership}
           ownershipMode={hasOwnership ? built.ownershipMode : null}
+          ownField={built.ownField}
           onLoad={(ids) => {
             setEditor(ids, lockIds);
             setMessage("Loaded into the editor.");
@@ -1222,6 +1304,7 @@ function BuiltLineups({
   rules,
   showOwnership,
   ownershipMode,
+  ownField,
   onLoad,
   onExport,
   onClear,
@@ -1232,6 +1315,7 @@ function BuiltLineups({
   rules: StackRules;
   showOwnership: boolean;
   ownershipMode: OwnershipMode | null;
+  ownField: OwnField;
   onLoad: (ids: string[]) => void;
   onExport: () => void;
   onClear: () => void;
@@ -1286,7 +1370,9 @@ function BuiltLineups({
       <div className="mt-4">
         <p className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">
           Exposure: share of lineups each player is in
-          {showOwnership && <span className="normal-case tracking-normal"> · vs. projected ownership (▲ over, ▼ under the field)</span>}
+          {showOwnership && (
+            <span className="normal-case tracking-normal"> · vs. projected {OWN_FIELD_LABEL[ownField]} ownership (▲ over, ▼ under the field)</span>
+          )}
           {ownershipMode && (
             <span className="normal-case tracking-normal text-sky-300">
               {" "}
@@ -1296,7 +1382,7 @@ function BuiltLineups({
         </p>
         <div className="flex flex-wrap gap-2">
           {mostUsed.map(({ p, pct }) => {
-            const own = showOwnership ? p.etr?.ownLarge : null;
+            const own = showOwnership ? ownOf(p, ownField) : null;
             const diff = typeof own === "number" ? pct - own : null;
             return (
               <span key={p.id} className="rounded-full border border-slate-700 bg-slate-950/70 px-3 py-1 text-xs">
@@ -1328,7 +1414,7 @@ function BuiltLineups({
                 <p className="text-sm">
                   <span className="font-bold text-emerald-300">{l.projected.toFixed(1)} pts</span>
                   <span className="ml-2 text-slate-500">{money(l.salary)}</span>
-                  {showOwnership && <span className="ml-2 text-xs text-slate-500">Own {totalOwnership(l.players).toFixed(0)}%</span>}
+                  {showOwnership && <span className="ml-2 text-xs text-slate-500">Own {totalOwnership(l.players, ownField).toFixed(0)}%</span>}
                 </p>
               </div>
               {(stack || l.players.filter((p) => p.position === "TE").length === 2) && (
