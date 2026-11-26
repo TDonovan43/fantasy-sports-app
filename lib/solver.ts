@@ -3,6 +3,7 @@ import loadHighs from "highs";
 import { isInactive } from "@/lib/dk-salaries";
 import { stoppedEarlyMessage } from "@/lib/optimizer";
 import { ownershipPlan, playersDue, type OwnershipMode } from "@/lib/ownership-weighting";
+import { targetPoints, type ScoringTarget } from "@/lib/scoring-target";
 import { NO_RULES, type StackRules } from "@/lib/stack-rules";
 
 export { NO_RULES, type StackRules };
@@ -38,6 +39,8 @@ export type SolveRequest = {
   rules?: StackRules;
   /** Salary held back for a DST when the pool has no defenses. */
   dstReserve?: number;
+  /** What to maximize: the projection, or a blend toward floor or ceiling. */
+  target?: ScoringTarget | null;
 };
 
 export type SolvedLineup = { ids: string[]; salary: number; projected: number };
@@ -170,7 +173,7 @@ export async function solveLineup(
     if (members.length > limit) add(`unique_${k}`, sum(ones(members)), "<=", limit);
   });
 
-  const objective = vars.map((p, i): [number, string] => [extra.objective?.get(p.id) ?? p.projected, x(i)]);
+  const objective = vars.map((p, i): [number, string] => [extra.objective?.get(p.id) ?? targetPoints(p, req.target), x(i)]);
   const bounds = vars.flatMap((p, i) => (locked.has(p.id) ? [` 1 <= ${x(i)} <= 1`] : []));
   const binaries = [...vars.map((_, i) => x(i)), ...gameVars.map(({ v }) => v)];
   const lp = [
@@ -282,7 +285,8 @@ export async function solveLineups(req: MultiRequest): Promise<MultiResult> {
         : new Map(
             req.players.map((p) => {
               const sigma = Math.max((p.ceiling - p.floor) / 2.12, 0.15 * p.projected);
-              return [p.id, p.projected > 0 ? Math.max(0.01, p.projected + req.randomness * gaussian(random) * sigma) : p.projected];
+              const base = targetPoints(p, req.target);
+              return [p.id, p.projected > 0 ? Math.max(0.01, base + req.randomness * gaussian(random) * sigma) : p.projected];
             }),
           );
     // Chalk behind schedule for its ownership minimum goes into this lineup (as many as still fit).

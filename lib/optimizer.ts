@@ -1,5 +1,6 @@
 import { isInactive } from "@/lib/dk-salaries";
 import { ownershipPlan, type OwnershipMode } from "@/lib/ownership-weighting";
+import { targetPoints, type ScoringTarget } from "@/lib/scoring-target";
 import type { PoolPlayer, Position } from "@/lib/types";
 
 /** DraftKings NFL Classic roster. */
@@ -241,6 +242,8 @@ export type MultiLineupOptions = OptimizeOptions & {
   /** Projected ownership (0–1) by player id, and how to weight lineups against it. */
   ownership?: Record<string, number>;
   ownershipMode?: OwnershipMode | null;
+  /** What to maximize: the projection, or a blend toward floor or ceiling. */
+  target?: ScoringTarget | null;
 };
 
 export type BuiltLineup = { players: PoolPlayer[]; salary: number; projected: number };
@@ -281,7 +284,7 @@ const EXCLUDE_AFTER = 8;
  * exposure cap and uses 2+ games. Scores and salaries shown are always the real projections.
  */
 export function generateLineups(options: MultiLineupOptions): MultiLineupResult {
-  const { pool, salaryCap, lockedIds = [], excludedIds = [], dstReserve, count, minUnique, maxExposure, randomness, gameOf } = options;
+  const { pool, salaryCap, lockedIds = [], excludedIds = [], dstReserve, count, minUnique, maxExposure, randomness, gameOf, target } = options;
   const random = seededRandom(options.seed ?? 1);
   const locked = new Set(lockedIds);
   const cap = Math.max(1, Math.floor(maxExposure * count + 1e-9));
@@ -302,14 +305,13 @@ export function generateLineups(options: MultiLineupOptions): MultiLineupResult 
     for (let attempt = 0; attempt < MAX_ATTEMPTS && !accepted; attempt++) {
       const scale = i === 0 && attempt === 0 ? 0 : randomness * (1 + attempt / 10);
       const capped = [...exposure].filter(([id, n]) => n >= capFor(id) && !locked.has(id)).map(([id]) => id);
-      const nudged =
-        scale === 0
-          ? pool
-          : pool.map((p) => {
-              if (p.projected <= 0) return p;
-              const sigma = Math.max((p.ceiling - p.floor) / 2.12, 0.15 * p.projected);
-              return { ...p, projected: Math.max(0.01, p.projected + scale * gaussian(random) * sigma) };
-            });
+      // Scores here are only for picking; accepted lineups use the real players (plain projections).
+      const nudged = pool.map((p) => {
+        if (p.projected <= 0) return p;
+        const sigma = Math.max((p.ceiling - p.floor) / 2.12, 0.15 * p.projected);
+        const base = targetPoints(p, target);
+        return { ...p, projected: scale === 0 ? base : Math.max(0.01, base + scale * gaussian(random) * sigma) };
+      });
       const result = optimizeLineup({
         pool: nudged,
         salaryCap,
